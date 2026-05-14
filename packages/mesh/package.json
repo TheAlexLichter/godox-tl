@@ -1,0 +1,38 @@
+{
+  "name": "@godox-tl/mesh",
+  "version": "1.0.0",
+  "description": "Native Node.js Bluetooth SIG Mesh client for Godox TL30 BLE control. Provisioning + Godox V2 payload encoder over BLE GATT proxy.",
+  "homepage": "https://github.com/TheAlexLichter/godox-tl#readme",
+  "bugs": {
+    "url": "https://github.com/TheAlexLichter/godox-tl/issues"
+  },
+  "license": "MIT",
+  "author": "Alexander Lichter <npm@lichter.io>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/TheAlexLichter/godox-tl.git"
+  },
+  "files": [
+    "src",
+    "dist"
+  ],
+  "type": "module",
+  "types": "./dist/index.d.mts",
+  "exports": {
+    ".": "./dist/index.mjs",
+    "./package.json": "./package.json"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "vp pack"
+  },
+  "dependencies": {
+    "@godox-tl/core": "workspace:^",
+    "@noble/ciphers": "^2.2.0",
+    "@noble/curves": "^2.2.0",
+    "@stoprocent/noble": "^2.5.3",
+    "effect": "^3.21.2"
+  }
+}

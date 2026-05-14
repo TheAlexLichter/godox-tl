@@ -1,0 +1,11 @@
+{
+  "ble_device": "83E72030-EF94-6299-21DD-372408DE38C2",
+  "mesh_src": "0x0001",
+  "mesh_dst": "0x0002",
+  "proxy_config_sequences": [310, 311],
+  "sequence": 312,
+  "iv_index": 0,
+  "vendor_opcode": 135664,
+  "godox_v2_payload_hex": "f04b20320000007e",
+  "proxy_pdu_hex": "0079377e08a9c5c6710b0afe129522d9a9b513393c2cee0b23dcbf789c34"
+}

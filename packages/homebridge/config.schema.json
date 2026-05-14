@@ -1,0 +1,183 @@
+{
+  "pluginAlias": "GodoxTL",
+  "pluginType": "platform",
+  "singular": true,
+  "headerDisplay": "Godox TL30 BLE plugin. Exposes lights as HomeKit accessories with brightness, color temperature, HomeKit color, and optional FX/RGBW preset switches.",
+  "footerDisplay": "Provisioned lights are read from the registry at `~/.config/godox-tl/registry.json` by default. Run `pnpm godox provision <address> --name <name>` to add lights from the CLI, or enable auto-provision below.",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "name": {
+        "title": "Bridge name",
+        "type": "string",
+        "default": "Godox TL",
+        "required": true
+      },
+      "registryPath": {
+        "title": "Registry path",
+        "description": "Path to the godox-tl registry JSON. Leave empty for the default (~/.config/godox-tl/registry.json).",
+        "type": "string"
+      },
+      "discoveryMode": {
+        "title": "Discovery mode",
+        "type": "string",
+        "default": "merge",
+        "oneOf": [
+          { "title": "Registry only", "enum": ["registry"] },
+          { "title": "Manual only", "enum": ["manual"] },
+          { "title": "Merge registry + manual", "enum": ["merge"] }
+        ]
+      },
+      "autoProvision": {
+        "title": "Periodic auto-provision",
+        "description": "Continuously scans for factory-reset lights after startup. Leave off for normal control.",
+        "type": "boolean",
+        "default": false
+      },
+      "startupScan": {
+        "title": "Scan once on startup",
+        "description": "Runs one BLE scan when Homebridge starts, before accessories are reconciled.",
+        "type": "boolean",
+        "default": true
+      },
+      "startupPruneMissing": {
+        "title": "Remove missing lights after startup scan",
+        "description": "If enabled and the startup scan sees Godox lights, registry entries not seen in that scan are removed and their HomeKit accessories are unregistered. Leave off for normal BLE use; short scans can miss nearby lights.",
+        "type": "boolean",
+        "default": false
+      },
+      "autoProvisionOnStartup": {
+        "title": "Auto-provision on startup scan",
+        "description": "During the one startup scan, provision matching factory-reset lights even when periodic auto-provision is off.",
+        "type": "boolean",
+        "default": true
+      },
+      "scanIntervalSeconds": {
+        "title": "Scan interval (seconds)",
+        "type": "integer",
+        "default": 60,
+        "minimum": 10
+      },
+      "discoveryFilters": {
+        "title": "Discovery name filters (regex)",
+        "type": "array",
+        "default": ["^GD_LED$"],
+        "items": { "type": "string" }
+      },
+      "nameTemplate": {
+        "title": "Auto-provisioned name template",
+        "description": "Used when auto-provisioning. `{shortAddr}` expands to the last 6 hex chars of the BLE address.",
+        "type": "string",
+        "default": "godox-{shortAddr}"
+      },
+      "enableColor": {
+        "title": "Expose HomeKit color controls",
+        "description": "Adds Hue and Saturation characteristics backed by Godox HSI mode.",
+        "type": "boolean",
+        "default": true
+      },
+      "fxPresets": {
+        "title": "FX preset switches",
+        "description": "Optional momentary HomeKit switches. Turning one on sends a Godox FX command, then resets the switch off.",
+        "type": "array",
+        "default": [],
+        "items": {
+          "type": "object",
+          "required": ["name", "effect"],
+          "properties": {
+            "name": { "title": "Name", "type": "string", "required": true },
+            "brightness": {
+              "title": "Brightness",
+              "type": "integer",
+              "default": 100,
+              "minimum": 0,
+              "maximum": 100
+            },
+            "effect": {
+              "title": "Effect",
+              "type": "integer",
+              "required": true,
+              "minimum": 0,
+              "maximum": 255
+            },
+            "level": {
+              "title": "Level / speed",
+              "type": "integer",
+              "default": 0,
+              "minimum": 0,
+              "maximum": 255
+            },
+            "filter": {
+              "title": "Filter",
+              "type": "integer",
+              "default": 0,
+              "minimum": 0,
+              "maximum": 255
+            }
+          }
+        }
+      },
+      "rgbwPresets": {
+        "title": "RGBW preset switches",
+        "description": "Optional momentary HomeKit switches. Turning one on sends raw Godox RGBW channel values, then resets the switch off.",
+        "type": "array",
+        "default": [],
+        "items": {
+          "type": "object",
+          "required": ["name"],
+          "properties": {
+            "name": { "title": "Name", "type": "string", "required": true },
+            "brightness": {
+              "title": "Brightness",
+              "type": "integer",
+              "default": 100,
+              "minimum": 0,
+              "maximum": 100
+            },
+            "red": {
+              "title": "Red",
+              "type": "integer",
+              "default": 0,
+              "minimum": 0,
+              "maximum": 255
+            },
+            "green": {
+              "title": "Green",
+              "type": "integer",
+              "default": 0,
+              "minimum": 0,
+              "maximum": 255
+            },
+            "blue": {
+              "title": "Blue",
+              "type": "integer",
+              "default": 0,
+              "minimum": 0,
+              "maximum": 255
+            },
+            "white": {
+              "title": "White",
+              "type": "integer",
+              "default": 0,
+              "minimum": 0,
+              "maximum": 255
+            }
+          }
+        }
+      },
+      "lights": {
+        "title": "Manual light entries",
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "name": { "title": "Name", "type": "string", "required": true },
+            "address": { "title": "BLE address", "type": "string", "required": true },
+            "statePath": { "title": "Mesh state file path", "type": "string", "required": true },
+            "nodeAddress": { "title": "Mesh node address", "type": "integer" }
+          }
+        }
+      }
+    }
+  }
+}

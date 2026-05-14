@@ -1,0 +1,45 @@
+{
+  "name": "@godox-tl/cli",
+  "version": "1.0.0",
+  "description": "godox CLI binary built on @effect/cli — scan, provision, CCT, HSI, RGBW, FX, registry, and rebind commands.",
+  "homepage": "https://github.com/TheAlexLichter/godox-tl#readme",
+  "bugs": {
+    "url": "https://github.com/TheAlexLichter/godox-tl/issues"
+  },
+  "license": "MIT",
+  "author": "Alexander Lichter <npm@lichter.io>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/TheAlexLichter/godox-tl.git"
+  },
+  "bin": {
+    "godox": "./dist/godox.mjs"
+  },
+  "files": [
+    "src",
+    "dist",
+    "!src/demo.ts",
+    "!dist/demo.*"
+  ],
+  "type": "module",
+  "exports": {
+    ".": "./dist/godox.mjs",
+    "./package.json": "./package.json"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "vp pack src/godox.ts --dts",
+    "godox": "node src/godox.ts",
+    "demo": "node src/demo.ts"
+  },
+  "dependencies": {
+    "@effect/cli": "^0.75.1",
+    "@effect/platform": "^0.96.1",
+    "@effect/platform-node": "^0.106.0",
+    "@godox-tl/core": "workspace:^",
+    "@godox-tl/mesh": "workspace:^",
+    "effect": "^3.21.2"
+  }
+}

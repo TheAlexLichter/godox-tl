@@ -1,0 +1,52 @@
+{
+  "name": "homebridge-godox-tl",
+  "displayName": "Godox TL",
+  "version": "1.0.0",
+  "description": "Homebridge plugin for Godox TL30 BLE control. Exposes brightness, color temperature, HSI color, and optional FX/RGBW presets via BLE SIG Mesh.",
+  "keywords": [
+    "ble",
+    "godox",
+    "homebridge-plugin",
+    "homekit",
+    "sig-mesh"
+  ],
+  "homepage": "https://github.com/TheAlexLichter/godox-tl#readme",
+  "bugs": {
+    "url": "https://github.com/TheAlexLichter/godox-tl/issues"
+  },
+  "license": "MIT",
+  "author": "Alexander Lichter <npm@lichter.io>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/TheAlexLichter/godox-tl.git"
+  },
+  "files": [
+    "src",
+    "dist",
+    "config.schema.json"
+  ],
+  "type": "module",
+  "types": "./dist/index.d.mts",
+  "exports": {
+    ".": "./dist/index.mjs",
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "build": "vp pack"
+  },
+  "dependencies": {
+    "@godox-tl/core": "workspace:^",
+    "@godox-tl/mesh": "workspace:^",
+    "effect": "^3.21.2"
+  },
+  "devDependencies": {
+    "homebridge": "^1.8.0 || ^2.0.0"
+  },
+  "peerDependencies": {
+    "homebridge": "^1.8.0 || ^2.0.0"
+  },
+  "engines": {
+    "homebridge": "^1.8.0 || ^2.0.0",
+    "node": "^22.0.0 || ^24.0.0"
+  }
+}

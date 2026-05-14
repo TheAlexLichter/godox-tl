@@ -1,0 +1,35 @@
+{
+  "name": "@godox-tl/core",
+  "version": "1.0.0",
+  "description": "Domain types, LightController service, registry, and transport-agnostic factory helpers for Godox TL30 BLE control.",
+  "homepage": "https://github.com/TheAlexLichter/godox-tl#readme",
+  "bugs": {
+    "url": "https://github.com/TheAlexLichter/godox-tl/issues"
+  },
+  "license": "MIT",
+  "author": "Alexander Lichter <npm@lichter.io>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/TheAlexLichter/godox-tl.git"
+  },
+  "files": [
+    "src",
+    "dist"
+  ],
+  "type": "module",
+  "types": "./dist/index.d.mts",
+  "exports": {
+    ".": "./dist/index.mjs",
+    "./package.json": "./package.json"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "vp pack"
+  },
+  "dependencies": {
+    "dmx-ts": "^0.4.0",
+    "effect": "^3.21.2"
+  }
+}
