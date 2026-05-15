@@ -21,9 +21,13 @@ jobs:
         with:
           node-version: 24.8.0
           cache: false
+          run-install: false
 
       - name: Install dependencies
         run: vp install --frozen-lockfile --ignore-scripts
+
+      - name: Build packages
+        run: vp run -r build
 
       - name: Check
         run: vp check
@@ -44,6 +48,7 @@ jobs:
         with:
           node-version: 24.8.0
           cache: false
+          run-install: false
 
       - name: Install dependencies
         run: vp install --frozen-lockfile --ignore-scripts
@@ -79,6 +84,7 @@ jobs:
         with:
           node-version: 24.8.0
           cache: false
+          run-install: false
 
       - name: Download package builds
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
@@ -109,6 +115,7 @@ jobs:
         with:
           node-version: 24.8.0
           cache: false
+          run-install: false
 
       - name: Install dependencies
         run: vp install --frozen-lockfile --ignore-scripts

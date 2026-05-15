@@ -23,15 +23,16 @@ jobs:
         with:
           node-version: 24.8.0
           cache: true
+          run-install: false
 
       - name: Install dependencies
         run: vp install --frozen-lockfile --ignore-scripts
+
+      - name: Build packages
+        run: vp run -r build
 
       - name: Check
         run: vp check
 
       - name: Test
         run: vp test
-
-      - name: Build packages
-        run: vp run -r build
