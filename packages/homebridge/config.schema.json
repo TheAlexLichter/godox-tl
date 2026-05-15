@@ -3,7 +3,7 @@
   "pluginType": "platform",
   "singular": true,
   "headerDisplay": "Godox TL30 BLE plugin. Exposes lights as HomeKit accessories with brightness, color temperature, HomeKit color, and optional FX/RGBW preset switches.",
-  "footerDisplay": "Provisioned lights are read from the registry at `~/.config/godox-tl/registry.json` by default. Run `pnpm godox provision <address> --name <name>` to add lights from the CLI, or enable auto-provision below.",
+  "footerDisplay": "Provisioned lights are read from the registry at `~/.config/godox-tl/registry.json` by default. Run `godox provision <address> --name <name>` to add lights from the globally installed CLI, or enable auto-provision below.",
   "schema": {
     "type": "object",
     "properties": {
