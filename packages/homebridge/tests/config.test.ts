@@ -1,5 +1,5 @@
 import { expect, test } from "vite-plus/test";
-import { expandName, resolveConfig, shortAddr } from "../src/config.ts";
+import { expandName, resolveConfig, shortAddr, statesDirForRegistry } from "../src/config.ts";
 
 test("resolveConfig applies sensible defaults", () => {
   const cfg = resolveConfig({});
@@ -17,6 +17,28 @@ test("resolveConfig applies sensible defaults", () => {
   expect(cfg.discoveryFilters[0]!.test("GD_LED")).toBe(true);
   expect(cfg.discoveryFilters[0]!.test("Random Phone")).toBe(false);
   expect(cfg.manualLights).toEqual([]);
+});
+
+test("resolveConfig uses the provided Homebridge registry default", () => {
+  const cfg = resolveConfig(
+    {},
+    { defaultRegistryPath: "/var/lib/homebridge/godox-tl/registry.json" },
+  );
+  expect(cfg.registryPath).toBe("/var/lib/homebridge/godox-tl/registry.json");
+});
+
+test("resolveConfig keeps explicit registryPath for shared CLI registries", () => {
+  const cfg = resolveConfig(
+    { registryPath: "/home/pi/.config/godox-tl/registry.json" },
+    { defaultRegistryPath: "/var/lib/homebridge/godox-tl/registry.json" },
+  );
+  expect(cfg.registryPath).toBe("/home/pi/.config/godox-tl/registry.json");
+});
+
+test("statesDirForRegistry stores state files next to the registry", () => {
+  expect(statesDirForRegistry("/var/lib/homebridge/godox-tl/registry.json")).toBe(
+    "/var/lib/homebridge/godox-tl/states",
+  );
 });
 
 test("resolveConfig normalizes effect and RGBW presets", () => {

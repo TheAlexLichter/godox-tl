@@ -1,4 +1,5 @@
-import type { LightEntry } from "@godox-tl/core";
+import { dirname, join } from "node:path";
+import { defaultRegistryPath as defaultCoreRegistryPath, type LightEntry } from "@godox-tl/core";
 
 export type DiscoveryMode = "registry" | "manual" | "merge";
 
@@ -55,7 +56,7 @@ export interface RgbwPreset {
 }
 
 export interface ResolvedConfig {
-  readonly registryPath: string | undefined;
+  readonly registryPath: string;
   readonly discoveryMode: DiscoveryMode;
   readonly autoProvision: boolean;
   readonly startupScan: boolean;
@@ -68,6 +69,10 @@ export interface ResolvedConfig {
   readonly fxPresets: ReadonlyArray<FxPreset>;
   readonly rgbwPresets: ReadonlyArray<RgbwPreset>;
   readonly manualLights: ReadonlyArray<LightEntry>;
+}
+
+export interface ResolveConfigOptions {
+  readonly defaultRegistryPath?: string;
 }
 
 const DEFAULT_FILTERS = ["^GD_LED$"];
@@ -109,7 +114,13 @@ const resolveRgbwPresets = (
       white: clampInt(p.white, 0, 255, 0),
     }));
 
-export const resolveConfig = (raw: PluginConfig): ResolvedConfig => {
+export const statesDirForRegistry = (registryPath: string): string =>
+  join(dirname(registryPath), "states");
+
+export const resolveConfig = (
+  raw: PluginConfig,
+  options: ResolveConfigOptions = {},
+): ResolvedConfig => {
   const filters = (
     raw.discoveryFilters && raw.discoveryFilters.length > 0 ? raw.discoveryFilters : DEFAULT_FILTERS
   ).map((s) => new RegExp(s));
@@ -127,7 +138,7 @@ export const resolveConfig = (raw: PluginConfig): ResolvedConfig => {
     }));
 
   return {
-    registryPath: raw.registryPath || undefined,
+    registryPath: raw.registryPath || options.defaultRegistryPath || defaultCoreRegistryPath(),
     discoveryMode: raw.discoveryMode ?? "merge",
     autoProvision: raw.autoProvision ?? false,
     startupScan: raw.startupScan ?? true,

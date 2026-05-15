@@ -1,8 +1,6 @@
 import { readdir, readFile } from "node:fs/promises";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import {
-  defaultRegistryPath,
   type DiscoveredDevice,
   type LightEntry,
   listLights,
@@ -16,16 +14,15 @@ import {
 } from "@godox-tl/mesh";
 import { Effect } from "effect";
 import type { ResolvedConfig } from "./config.ts";
-import { expandName } from "./config.ts";
+import { expandName, statesDirForRegistry } from "./config.ts";
 
 /** Resolve final list of known lights at startup. */
 export const discoverKnownLights = (config: ResolvedConfig) =>
   Effect.gen(function* () {
-    const registryPath = config.registryPath ?? defaultRegistryPath();
     if (config.discoveryMode === "manual") {
       return config.manualLights;
     }
-    const fromRegistry = yield* listLights(registryPath).pipe(
+    const fromRegistry = yield* listLights(config.registryPath).pipe(
       Effect.orElseSucceed(() => [] as ReadonlyArray<LightEntry>),
     );
     if (config.discoveryMode === "registry") {
@@ -43,14 +40,6 @@ export const discoverKnownLights = (config: ResolvedConfig) =>
     }
     return merged;
   });
-
-/** Where freshly auto-provisioned state files go. */
-const statesDirFor = (registryPath: string | undefined): string => {
-  if (registryPath) {
-    return join(registryPath, "..", "states");
-  }
-  return join(homedir(), ".config", "godox-tl", "states");
-};
 
 export interface ProvisionResult {
   readonly entry: LightEntry;
@@ -116,8 +105,7 @@ const provisionCandidates = (
     }
 
     const results: ProvisionResult[] = [];
-    const registryPath = config.registryPath ?? defaultRegistryPath();
-    const statesDir = statesDirFor(config.registryPath);
+    const statesDir = statesDirForRegistry(config.registryPath);
 
     // Give the BLE adapter a beat to settle after the discovery scan's
     // fire-and-forget `stopScanningAsync` before kicking off the provisioning
@@ -135,7 +123,7 @@ const provisionCandidates = (
           const r = yield* provisionAndRebind(dev.address, { statePath });
           return yield* register(
             { name, address: dev.address, statePath, nodeAddress: r.state.nodeAddress },
-            registryPath,
+            config.registryPath,
           );
         }),
       ).pipe(
@@ -177,7 +165,7 @@ const recoverEntriesFromStateFiles = (
         devices.filter((d) => !d.unprovisioned).map((d) => normalizeAddress(d.address)),
       );
 
-      const statesDir = statesDirFor(config.registryPath);
+      const statesDir = statesDirForRegistry(config.registryPath);
       const names = await readdir(statesDir).catch(() => [] as string[]);
       const recovered: LightEntry[] = [];
       for (const name of names) {
@@ -243,9 +231,8 @@ export const runStartupScan = (config: ResolvedConfig, entries: ReadonlyArray<Li
     const allEntries = [...knownBeforeProvision, ...provisioned.map((r) => r.entry)];
 
     if (recovered.length > 0 && config.discoveryMode !== "manual") {
-      const registryPath = config.registryPath ?? defaultRegistryPath();
       const nextRegistry = Object.fromEntries(allEntries.map((e) => [e.name, e]));
-      yield* saveRegistry({ lights: nextRegistry }, registryPath);
+      yield* saveRegistry({ lights: nextRegistry }, config.registryPath);
     }
 
     const discoveredKnownAddresses = new Set(
@@ -270,9 +257,8 @@ export const runStartupScan = (config: ResolvedConfig, entries: ReadonlyArray<Li
     }
 
     if (config.discoveryMode !== "manual") {
-      const registryPath = config.registryPath ?? defaultRegistryPath();
       const nextRegistry = Object.fromEntries(filtered.map((e) => [e.name, e]));
-      yield* saveRegistry({ lights: nextRegistry }, registryPath);
+      yield* saveRegistry({ lights: nextRegistry }, config.registryPath);
     }
 
     return { entries: filtered, provisioned } satisfies StartupScanResult;

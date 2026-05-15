@@ -1,7 +1,12 @@
 import type { LightEntry } from "@godox-tl/core";
 import { expect, test } from "vite-plus/test";
 import type { API, Logger, PlatformAccessory } from "homebridge";
-import { GodoxTLPlatform, PLATFORM_NAME, PLUGIN_NAME } from "../src/platform.ts";
+import {
+  defaultHomebridgeRegistryPath,
+  GodoxTLPlatform,
+  PLATFORM_NAME,
+  PLUGIN_NAME,
+} from "../src/platform.ts";
 
 class FakeCharacteristic {
   setProps(): this {
@@ -95,6 +100,9 @@ const makeHarness = () => {
       },
     },
     platformAccessory: FakeAccessory,
+    user: {
+      storagePath: () => "/var/lib/homebridge",
+    },
     registerPlatformAccessories: (
       pluginName: string,
       platformName: string,
@@ -130,6 +138,15 @@ const makeHarness = () => {
   ).materializeAccessories.bind(platform);
   return { platform, materialize, registered, unregistered };
 };
+
+test("defaultHomebridgeRegistryPath stores plugin files under Homebridge storage", () => {
+  const api = {
+    user: {
+      storagePath: () => "/var/lib/homebridge",
+    },
+  } as unknown as API;
+  expect(defaultHomebridgeRegistryPath(api)).toBe("/var/lib/homebridge/godox-tl/registry.json");
+});
 
 test("materializeAccessories uses address-stable UUIDs across renames", () => {
   const { platform, materialize, registered } = makeHarness();

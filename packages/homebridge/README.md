@@ -66,10 +66,11 @@ godox scan
 godox provision <BLE-address> --name kitchen
 ```
 
-The default registry is `~/.config/godox-tl/registry.json`; per-light mesh state
-files live under `~/.config/godox-tl/states/`. If Homebridge runs as a different
-service user, either run the CLI as that same user or set `registryPath` to the
-CLI registry and make sure the Homebridge user can write the state files.
+By default, Homebridge stores the registry at
+`<homebridge-storage>/godox-tl/registry.json`; per-light mesh state files live
+under `<homebridge-storage>/godox-tl/states/`. To share a CLI registry, set
+`registryPath` to the CLI registry and make sure the Homebridge user can write
+the registry and state files.
 
 ## Configuration
 
@@ -82,22 +83,22 @@ settings form. The platform alias is:
 }
 ```
 
-| Field                    | Default                            | Description                                                                                                    |
-| ------------------------ | ---------------------------------- | -------------------------------------------------------------------------------------------------------------- |
-| `name`                   | `"Godox TL"`                       | Platform name shown in Homebridge logs.                                                                        |
-| `registryPath`           | `~/.config/godox-tl/registry.json` | Registry JSON path. Leave empty for the default shared CLI registry.                                           |
-| `discoveryMode`          | `"merge"`                          | `"registry"`, `"manual"`, or `"merge"` (registry plus manual overrides by name).                               |
-| `autoProvision`          | `false`                            | Continuously scan and provision matching factory-reset lights after startup.                                   |
-| `startupScan`            | `true`                             | Run one BLE scan when Homebridge starts.                                                                       |
-| `startupPruneMissing`    | `false`                            | Remove registry entries missed by the startup scan. Leave off for normal BLE use; short scans can miss lights. |
-| `autoProvisionOnStartup` | `true`                             | Provision matching factory-reset lights during the startup scan even when periodic auto-provision is off.      |
-| `scanIntervalSeconds`    | `60`                               | Periodic scan interval. Clamped to at least 10 seconds.                                                        |
-| `discoveryFilters`       | `["^GD_LED$"]`                     | JavaScript regex patterns matched against advertised BLE names.                                                |
-| `nameTemplate`           | `"godox-{shortAddr}"`              | Name assigned to auto-provisioned lights. `{shortAddr}` expands to the last 6 hex chars of the BLE address.    |
-| `enableColor`            | `true`                             | Adds HomeKit `Hue` and `Saturation` controls backed by Godox HSI mode.                                         |
-| `fxPresets`              | `[]`                               | Optional momentary switch services: `{name, brightness?, effect, level?, filter?}`.                            |
-| `rgbwPresets`            | `[]`                               | Optional momentary switch services: `{name, brightness?, red?, green?, blue?, white?}`.                        |
-| `lights`                 | `[]`                               | Manual entries `{name, address, statePath, nodeAddress?}`.                                                     |
+| Field                    | Default               | Description                                                                                                    |
+| ------------------------ | --------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `name`                   | `"Godox TL"`          | Platform name shown in Homebridge logs.                                                                        |
+| `registryPath`           | Homebridge storage    | Registry JSON path. Leave empty to store registry and state files under the Homebridge storage directory.      |
+| `discoveryMode`          | `"merge"`             | `"registry"`, `"manual"`, or `"merge"` (registry plus manual overrides by name).                               |
+| `autoProvision`          | `false`               | Continuously scan and provision matching factory-reset lights after startup.                                   |
+| `startupScan`            | `true`                | Run one BLE scan when Homebridge starts.                                                                       |
+| `startupPruneMissing`    | `false`               | Remove registry entries missed by the startup scan. Leave off for normal BLE use; short scans can miss lights. |
+| `autoProvisionOnStartup` | `true`                | Provision matching factory-reset lights during the startup scan even when periodic auto-provision is off.      |
+| `scanIntervalSeconds`    | `60`                  | Periodic scan interval. Clamped to at least 10 seconds.                                                        |
+| `discoveryFilters`       | `["^GD_LED$"]`        | JavaScript regex patterns matched against advertised BLE names.                                                |
+| `nameTemplate`           | `"godox-{shortAddr}"` | Name assigned to auto-provisioned lights. `{shortAddr}` expands to the last 6 hex chars of the BLE address.    |
+| `enableColor`            | `true`                | Adds HomeKit `Hue` and `Saturation` controls backed by Godox HSI mode.                                         |
+| `fxPresets`              | `[]`                  | Optional momentary switch services: `{name, brightness?, effect, level?, filter?}`.                            |
+| `rgbwPresets`            | `[]`                  | Optional momentary switch services: `{name, brightness?, red?, green?, blue?, white?}`.                        |
+| `lights`                 | `[]`                  | Manual entries `{name, address, statePath, nodeAddress?}`.                                                     |
 
 ## HomeKit Services
 
@@ -134,7 +135,7 @@ From the monorepo:
 ```bash
 vp install
 vp run -r build
-vp test -F homebridge-godox-tl
+vp test packages/homebridge/tests
 ```
 
 The plugin entry point is `src/index.ts`; the dynamic platform implementation is

@@ -1,4 +1,5 @@
-import { defaultRegistryPath, type LightEntry } from "@godox-tl/core";
+import { join } from "node:path";
+import type { LightEntry } from "@godox-tl/core";
 import { Effect, type Layer } from "effect";
 import type {
   API,
@@ -14,6 +15,8 @@ import { homebridgeLoggerLayer } from "./logger.ts";
 
 export const PLATFORM_NAME = "GodoxTL";
 export const PLUGIN_NAME = "homebridge-godox-tl";
+export const defaultHomebridgeRegistryPath = (api: API): string =>
+  join(api.user.storagePath(), "godox-tl", "registry.json");
 
 interface CachedAccessory {
   readonly accessory: PlatformAccessory;
@@ -31,7 +34,9 @@ export class GodoxTLPlatform implements DynamicPlatformPlugin {
     rawConfig: PlatformConfig,
     public readonly api: API,
   ) {
-    this.config = resolveConfig(rawConfig as PluginConfig);
+    this.config = resolveConfig(rawConfig as PluginConfig, {
+      defaultRegistryPath: defaultHomebridgeRegistryPath(api),
+    });
     this.loggerLayer = homebridgeLoggerLayer(this.log);
     this.log.info("Godox TL platform loaded");
     this.api.on("didFinishLaunching", () => {
@@ -66,7 +71,7 @@ export class GodoxTLPlatform implements DynamicPlatformPlugin {
       const entrySummary = entries.map((e) => `${e.name}@${e.address}`).join(", ");
       this.log.info(
         `Loaded ${entries.length} known light(s) ` +
-          `(registry=${this.config.registryPath ?? defaultRegistryPath()}, mode=${this.config.discoveryMode})` +
+          `(registry=${this.config.registryPath}, mode=${this.config.discoveryMode})` +
           `${entrySummary ? `: ${entrySummary}` : ""}`,
       );
       this.materializeAccessories(entries, true);
