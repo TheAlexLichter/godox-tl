@@ -5,10 +5,15 @@
   "description": "Homebridge plugin for Godox TL30 BLE control. Exposes brightness, color temperature, HSI color, and optional FX/RGBW presets via BLE SIG Mesh.",
   "keywords": [
     "ble",
+    "bluetooth",
     "godox",
+    "godox-tl",
+    "homebridge",
     "homebridge-plugin",
     "homekit",
-    "sig-mesh"
+    "mesh",
+    "sig-mesh",
+    "tl30"
   ],
   "homepage": "https://github.com/TheAlexLichter/godox-tl#readme",
   "bugs": {
