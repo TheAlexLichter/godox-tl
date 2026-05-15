@@ -122,6 +122,12 @@ const hap = {
     Hue: "Hue",
     Saturation: "Saturation",
   },
+  ColorUtils: {
+    colorTemperatureToHueAndSaturation: (mireds: number) => ({
+      hue: Math.round(mireds / 10),
+      saturation: Math.round(mireds / 12),
+    }),
+  },
 } as unknown as HAP;
 
 const logger = {
@@ -179,12 +185,39 @@ test("HomeKit color updates ignore trailing color temperature echoes", () => {
     0,
   );
   const service = accessory.getService("Lightbulb") as FakeService;
+  const originalMireds = light.currentState.mireds;
 
   service.getCharacteristic("Hue").set(300);
   service.getCharacteristic("Saturation").set(100);
+  expect(service.getCharacteristic("ColorTemperature").value).toBe(HOMEKIT_MIRED_MIN);
+
   service.getCharacteristic("ColorTemperature").set(250);
 
   expect(light.currentState.mode).toBe("hsi");
   expect(light.currentState.hue).toBe(300);
   expect(light.currentState.saturation).toBe(100);
+  expect(light.currentState.mireds).toBe(originalMireds);
+  expect(service.getCharacteristic("ColorTemperature").value).toBe(HOMEKIT_MIRED_MIN);
+});
+
+test("HomeKit color temperature writes publish matching hue and saturation values", () => {
+  const accessory = new FakeAccessory();
+  const light = new GodoxLightAccessory(
+    lightEntry,
+    accessory as unknown as PlatformAccessory,
+    hap,
+    logger,
+    { enableColor: true, fxPresets: [], rgbwPresets: [] },
+    0,
+  );
+  const service = accessory.getService("Lightbulb") as FakeService;
+
+  service.getCharacteristic("ColorTemperature").set(250);
+
+  expect(light.currentState.mode).toBe("cct");
+  expect(light.currentState.mireds).toBe(250);
+  expect(light.currentState.hue).toBe(25);
+  expect(light.currentState.saturation).toBe(21);
+  expect(service.getCharacteristic("Hue").value).toBe(25);
+  expect(service.getCharacteristic("Saturation").value).toBe(21);
 });

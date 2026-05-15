@@ -53,6 +53,7 @@ const cloneState = (state: CommandState): CommandState => ({
 });
 
 const RESTORE_ECHO_SUPPRESSION_MS = 1_500;
+type HomeKitCharacteristic = NonNullable<ReturnType<Service["getCharacteristic"]>>;
 
 export interface HomeKitFeatureConfig {
   readonly enableColor: boolean;
@@ -147,18 +148,20 @@ export class GodoxLightAccessory {
 
     colorTemperature
       .onSet((v) => {
-        this.state.mireds = clampMireds(Math.round(Number(v)));
-        colorTemperature.updateValue(this.state.mireds);
         this.state.on = true;
         if (this.shouldSuppressColorTemperatureModeSwitch()) {
           this.state.mode = this.restoredMode ?? this.state.mode;
+          this.setColorTemperatureForColorMode(colorTemperature);
         } else {
           this.clearColorTemperatureEchoSuppression();
+          this.state.mireds = clampMireds(Math.round(Number(v)));
           this.state.mode = "cct";
+          colorTemperature.updateValue(this.state.mireds);
+          this.updateColorFromTemperature(this.state.mireds);
         }
         this.queue();
       })
-      .onGet(() => this.state.mireds);
+      .onGet(() => this.colorTemperatureForHomeKit());
 
     if (this.features.enableColor) {
       this.service
@@ -168,6 +171,7 @@ export class GodoxLightAccessory {
           this.state.hue = Math.max(0, Math.min(360, Math.round(Number(v))));
           this.state.on = true;
           this.state.mode = "hsi";
+          this.setColorTemperatureForColorMode(colorTemperature);
           this.suppressColorTemperatureEchoFor("hsi");
           this.queue();
         })
@@ -180,6 +184,7 @@ export class GodoxLightAccessory {
           this.state.saturation = Math.max(0, Math.min(100, Math.round(Number(v))));
           this.state.on = true;
           this.state.mode = "hsi";
+          this.setColorTemperatureForColorMode(colorTemperature);
           this.suppressColorTemperatureEchoFor("hsi");
           this.queue();
         })
@@ -257,6 +262,25 @@ export class GodoxLightAccessory {
   private clearColorTemperatureEchoSuppression(): void {
     this.restoredMode = undefined;
     this.suppressColorTemperatureModeSwitchUntil = 0;
+  }
+
+  private colorTemperatureForHomeKit(): number {
+    return this.state.mode === "hsi" ? HOMEKIT_MIRED_MIN : this.state.mireds;
+  }
+
+  private setColorTemperatureForColorMode(colorTemperature: HomeKitCharacteristic): void {
+    colorTemperature.value = HOMEKIT_MIRED_MIN;
+  }
+
+  private updateColorFromTemperature(mireds: number): void {
+    if (!this.features.enableColor) return;
+    const color = this.hap.ColorUtils.colorTemperatureToHueAndSaturation(mireds);
+    this.state.hue = color.hue;
+    this.state.saturation = color.saturation;
+    this.service.getCharacteristic(this.hap.Characteristic.Hue).updateValue(color.hue);
+    this.service
+      .getCharacteristic(this.hap.Characteristic.Saturation)
+      .updateValue(color.saturation);
   }
 
   private send(s: CommandState): void {
