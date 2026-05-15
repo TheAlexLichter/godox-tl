@@ -4,6 +4,16 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref to publish"
+        required: true
+        default: "main"
+      filter:
+        description: "Optional workspace package filter"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -15,6 +25,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ inputs.ref || github.ref }}
 
       - name: Setup Vite+
         uses: voidzero-dev/setup-vp@ca1c46663915d6c1042ae23bd39ab85718bfb0fa # v1.10.0
@@ -42,6 +54,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ inputs.ref || github.ref }}
 
       - name: Setup Vite+
         uses: voidzero-dev/setup-vp@ca1c46663915d6c1042ae23bd39ab85718bfb0fa # v1.10.0
@@ -78,6 +92,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ inputs.ref || github.ref }}
 
       - name: Setup Vite+
         uses: voidzero-dev/setup-vp@ca1c46663915d6c1042ae23bd39ab85718bfb0fa # v1.10.0
@@ -99,7 +115,14 @@ jobs:
         run: tar -xzf artifacts/package-builds.tgz
 
       - name: Publish to npm
-        run: vp pm publish -r --access public --no-git-checks --provenance --report-summary
+        run: |
+          args=(-r --access public --no-git-checks --provenance --report-summary)
+          if [ -n "$PUBLISH_FILTER" ]; then
+            args+=(--filter "$PUBLISH_FILTER")
+          fi
+          vp pm publish "${args[@]}"
+        env:
+          PUBLISH_FILTER: ${{ inputs.filter }}
 
   release:
     name: GitHub Release
@@ -111,6 +134,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          ref: ${{ inputs.ref || github.ref }}
           fetch-depth: 0
 
       - name: Setup Vite+
@@ -124,6 +148,7 @@ jobs:
         run: vp install --frozen-lockfile --ignore-scripts
 
       - name: Generate release notes
-        run: vp exec changelogithub --name "$GITHUB_REF_NAME" --contributors
+        run: vp exec changelogithub --name "$RELEASE_NAME" --contributors
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_NAME: ${{ inputs.ref || github.ref_name }}
