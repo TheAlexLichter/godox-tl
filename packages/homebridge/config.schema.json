@@ -6,12 +6,12 @@
   "footerDisplay": "Provisioned lights are stored under the Homebridge storage directory by default. Set `registryPath` to share a CLI registry, or enable auto-provision below.",
   "schema": {
     "type": "object",
+    "required": ["name"],
     "properties": {
       "name": {
         "title": "Bridge name",
         "type": "string",
-        "default": "Godox TL",
-        "required": true
+        "default": "Godox TL"
       },
       "registryPath": {
         "title": "Registry path",
@@ -85,7 +85,7 @@
           "type": "object",
           "required": ["name", "effect"],
           "properties": {
-            "name": { "title": "Name", "type": "string", "required": true },
+            "name": { "title": "Name", "type": "string" },
             "brightness": {
               "title": "Brightness",
               "type": "integer",
@@ -96,7 +96,6 @@
             "effect": {
               "title": "Effect",
               "type": "integer",
-              "required": true,
               "minimum": 0,
               "maximum": 255
             },
@@ -126,7 +125,7 @@
           "type": "object",
           "required": ["name"],
           "properties": {
-            "name": { "title": "Name", "type": "string", "required": true },
+            "name": { "title": "Name", "type": "string" },
             "brightness": {
               "title": "Brightness",
               "type": "integer",
@@ -170,10 +169,11 @@
         "type": "array",
         "items": {
           "type": "object",
+          "required": ["name", "address", "statePath"],
           "properties": {
-            "name": { "title": "Name", "type": "string", "required": true },
-            "address": { "title": "BLE address", "type": "string", "required": true },
-            "statePath": { "title": "Mesh state file path", "type": "string", "required": true },
+            "name": { "title": "Name", "type": "string" },
+            "address": { "title": "BLE address", "type": "string" },
+            "statePath": { "title": "Mesh state file path", "type": "string" },
             "nodeAddress": { "title": "Mesh node address", "type": "integer" }
           }
         }
