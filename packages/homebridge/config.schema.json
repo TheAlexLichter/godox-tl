@@ -48,9 +48,9 @@
       },
       "autoProvisionOnStartup": {
         "title": "Auto-provision on startup scan",
-        "description": "During the one startup scan, provision matching factory-reset lights even when periodic auto-provision is off.",
+        "description": "During the one startup scan, provision matching factory-reset lights even when periodic auto-provision is off. Leave disabled unless you are intentionally onboarding factory-reset lights.",
         "type": "boolean",
-        "default": true
+        "default": false
       },
       "scanIntervalSeconds": {
         "title": "Scan interval (seconds)",

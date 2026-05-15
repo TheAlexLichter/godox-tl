@@ -143,7 +143,7 @@ export const resolveConfig = (
     autoProvision: raw.autoProvision ?? false,
     startupScan: raw.startupScan ?? true,
     startupPruneMissing: raw.startupPruneMissing ?? false,
-    autoProvisionOnStartup: raw.autoProvisionOnStartup ?? true,
+    autoProvisionOnStartup: raw.autoProvisionOnStartup ?? false,
     scanIntervalSeconds: Math.max(10, raw.scanIntervalSeconds ?? 60),
     discoveryFilters: filters,
     nameTemplate: raw.nameTemplate ?? "godox-{shortAddr}",

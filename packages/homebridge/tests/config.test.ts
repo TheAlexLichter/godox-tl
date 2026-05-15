@@ -7,7 +7,7 @@ test("resolveConfig applies sensible defaults", () => {
   expect(cfg.autoProvision).toBe(false);
   expect(cfg.startupScan).toBe(true);
   expect(cfg.startupPruneMissing).toBe(false);
-  expect(cfg.autoProvisionOnStartup).toBe(true);
+  expect(cfg.autoProvisionOnStartup).toBe(false);
   expect(cfg.scanIntervalSeconds).toBe(60);
   expect(cfg.nameTemplate).toBe("godox-{shortAddr}");
   expect(cfg.enableColor).toBe(true);

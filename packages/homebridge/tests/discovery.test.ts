@@ -157,6 +157,22 @@ test("runStartupScan keeps known lights missed by a short startup scan by defaul
   expect(result.entries.map((e) => e.name)).toEqual(["seen", "missed"]);
 });
 
+test("runStartupScan does not provision by default", async () => {
+  const noble = new FailingProvisionNoble();
+  __setNobleForTesting(noble);
+  const cfg = {
+    ...config(join(dir, "registry.json")),
+    autoProvision: false,
+    autoProvisionOnStartup: false,
+  };
+
+  const result = await Effect.runPromise(runStartupScan(cfg, []));
+
+  expect(result.entries).toEqual([]);
+  expect(result.provisioned).toEqual([]);
+  expect(noble.startCount).toBe(1);
+});
+
 test("runStartupScan prunes missed known lights only when explicitly enabled", async () => {
   __setNobleForTesting(new OneProvisionedScanNoble());
   const cfg = { ...config(join(dir, "registry.json")), startupPruneMissing: true };

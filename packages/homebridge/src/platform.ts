@@ -85,7 +85,9 @@ export class GodoxTLPlatform implements DynamicPlatformPlugin {
       void this.scanCycle();
     } else {
       this.log.info(
-        "Periodic auto-provision is disabled (autoProvision=false); restart Homebridge to run the startup provisioning scan again.",
+        this.config.autoProvisionOnStartup
+          ? "Periodic auto-provision is disabled (autoProvision=false); restart Homebridge to run the startup provisioning scan again."
+          : "Auto-provision is disabled; enable autoProvisionOnStartup for one-shot startup provisioning or autoProvision for periodic provisioning.",
       );
     }
   }
