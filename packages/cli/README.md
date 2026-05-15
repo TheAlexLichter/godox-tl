@@ -9,7 +9,7 @@ Part of the [godox-tl monorepo](https://github.com/TheAlexLichter/godox-tl).
 
 ## Install
 
-After publishing:
+Install globally:
 
 ```bash
 vp add -g @godox-tl/cli
@@ -23,6 +23,10 @@ From this workspace:
 vp install
 vp run @godox-tl/cli#godox -- --help
 ```
+
+The global install provides the `godox` binary. All examples below assume the
+global CLI; from this workspace, prefix commands with
+`vp run @godox-tl/cli#godox --`.
 
 ## Subcommands
 

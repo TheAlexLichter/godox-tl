@@ -11,7 +11,8 @@ Part of the [godox-tl monorepo](https://github.com/TheAlexLichter/godox-tl).
 
 - **Native JS runtime**: uses [`@godox-tl/mesh`](../mesh/README.md), a
   native Node implementation of the Godox BLE SIG Mesh stack. Installs and
-  runs on a Raspberry Pi via `vp add -g homebridge-godox-tl` (or `pnpm add -g homebridge-godox-tl` / `npm add -g homebridge-godox-tl`).
+  runs on a Raspberry Pi via `vp add -g homebridge-godox-tl` (or
+  `pnpm add -g homebridge-godox-tl`).
 - **Registry-first discovery**: reads `~/.config/godox-tl/registry.json`
   at startup and exposes each entry. Provision new lights from the CLI
   (`godox provision <addr> --name <name>`) and the plugin picks them up
