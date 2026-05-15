@@ -65,8 +65,12 @@ test("VENDOR_OPCODE encodes 0x00F011 in Telink little-endian byte order", () => 
 
 test("encodeHsi emits the reverse-engineered HSI payload", () => {
   expect(toHex(encodeHsi(100, 0, 100))).toBe("f16400006400005d");
-  expect(toHex(encodeHsi(100, 120, 100))).toBe("f16455006400001a");
-  expect(toHex(encodeHsi(100, 240, 100))).toBe("f164aa00640000d3");
+  expect(toHex(encodeHsi(100, 120, 100))).toBe("f16478006400000e");
+  expect(toHex(encodeHsi(100, 240, 100))).toBe("f164f000640000fb");
+});
+
+test("encodeHsi preserves purple hue degrees instead of compressing to blue", () => {
+  expect(toHex(encodeHsi(100, 300, 100))).toBe("f1642c016400000b");
 });
 
 test("encodeHsi rejects out-of-range inputs", () => {

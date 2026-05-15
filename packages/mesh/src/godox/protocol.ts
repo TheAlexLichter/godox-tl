@@ -138,8 +138,9 @@ const validateByte = (value: number, label: string): void => {
  * Encode an HSI command for a Godox TL30 light.
  *
  * Reverse-engineered from Godox Bluetooth Mesh traffic:
- * model `0xf1`, data `[brightness, hueByte, 0, saturation, 0]`, end byte `0`.
- * The hue byte is a 0..255 color wheel, not the DMX `hue / 2` value.
+ * model `0xf1`, data `[brightness, hueLow, hueHigh, saturation, 0]`, end byte `0`.
+ * Hue is sent as little-endian degrees. This differs from DMX profiles that map
+ * hue onto one 0..255 channel.
  */
 export const encodeHsi = (brightness: number, hue: number, saturation: number): Uint8Array => {
   validateBrightness(brightness);
@@ -147,10 +148,10 @@ export const encodeHsi = (brightness: number, hue: number, saturation: number): 
   validateSaturation(saturation);
 
   const percent = Math.round(brightness);
-  const hueByte = Math.round((hue % 360) * (255 / 360)) & 0xff;
+  const hueDegrees = Math.round(hue);
   const sat = Math.round(saturation);
 
-  return buildV2Command(0xf1, 0x00, [percent, hueByte, 0, sat, 0]);
+  return buildV2Command(0xf1, 0x00, [percent, hueDegrees & 0xff, hueDegrees >> 8, sat, 0]);
 };
 
 /**
