@@ -167,8 +167,8 @@ export class GodoxLightAccessory {
         .onSet((v) => {
           this.state.hue = Math.max(0, Math.min(360, Math.round(Number(v))));
           this.state.on = true;
-          this.clearColorTemperatureEchoSuppression();
           this.state.mode = "hsi";
+          this.suppressColorTemperatureEchoFor("hsi");
           this.queue();
         })
         .onGet(() => this.state.hue);
@@ -179,8 +179,8 @@ export class GodoxLightAccessory {
         .onSet((v) => {
           this.state.saturation = Math.max(0, Math.min(100, Math.round(Number(v))));
           this.state.on = true;
-          this.clearColorTemperatureEchoSuppression();
           this.state.mode = "hsi";
+          this.suppressColorTemperatureEchoFor("hsi");
           this.queue();
         })
         .onGet(() => this.state.saturation);

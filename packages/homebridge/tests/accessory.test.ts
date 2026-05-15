@@ -167,3 +167,24 @@ test("turning off and on restores the last HSI mode instead of falling back to C
   expect(light.currentState.hue).toBe(210);
   expect(light.currentState.saturation).toBe(65);
 });
+
+test("HomeKit color updates ignore trailing color temperature echoes", () => {
+  const accessory = new FakeAccessory();
+  const light = new GodoxLightAccessory(
+    lightEntry,
+    accessory as unknown as PlatformAccessory,
+    hap,
+    logger,
+    { enableColor: true, fxPresets: [], rgbwPresets: [] },
+    0,
+  );
+  const service = accessory.getService("Lightbulb") as FakeService;
+
+  service.getCharacteristic("Hue").set(300);
+  service.getCharacteristic("Saturation").set(100);
+  service.getCharacteristic("ColorTemperature").set(250);
+
+  expect(light.currentState.mode).toBe("hsi");
+  expect(light.currentState.hue).toBe(300);
+  expect(light.currentState.saturation).toBe(100);
+});
