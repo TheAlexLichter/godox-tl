@@ -18,6 +18,7 @@
     "build": "vp run -r build",
     "changelog": "changelogithub --output CHANGELOG.md",
     "check": "vp check",
+    "smoke": "node packages/cli/dist/godox.mjs --help && node -e \"await import('./packages/homebridge/dist/index.mjs')\"",
     "test": "vp test"
   },
   "devDependencies": {
