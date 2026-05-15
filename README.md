@@ -109,7 +109,8 @@ Homebridge `config.json`:
     {
       "platform": "GodoxTL",
       "name": "Godox TL",
-      "autoProvision": true,
+      "autoProvision": false,
+      "autoProvisionOnStartup": false,
       "discoveryFilters": ["^GD_LED$"],
       "scanIntervalSeconds": 60
     }
@@ -120,10 +121,12 @@ Homebridge `config.json`:
 Discovery is **registry-first**: the plugin loads
 `~/.config/godox-tl/registry.json` (or a custom `registryPath`) at startup and
 exposes each entry as a `Service.Lightbulb` with `On` / `Brightness` /
-`ColorTemperature` characteristics. If `autoProvision` is true, every
-`scanIntervalSeconds` it scans for lights whose advertised name matches a
-filter regex, auto-provisions any new ones, and adds them as HomeKit
-accessories with the `nameTemplate` (default `godox-{shortAddr}`).
+`ColorTemperature` characteristics. The startup BLE scan does not provision by
+default. To provision factory-reset lights from Homebridge, opt in with
+`autoProvisionOnStartup: true` for a one-shot startup provisioning pass, or
+`autoProvision: true` to scan every `scanIntervalSeconds`; matching lights are
+added as HomeKit accessories with the `nameTemplate` (default
+`godox-{shortAddr}`).
 
 Set handlers are debounced 100 ms so HomeKit slider drags don't flood the
 mesh. Mesh sends are serialized per controller so concurrent HomeKit updates

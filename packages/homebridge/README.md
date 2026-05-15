@@ -44,15 +44,25 @@ Add the platform in Homebridge UI, or add this to `config.json`:
       "name": "Godox TL",
       "autoProvision": false,
       "startupScan": true,
-      "autoProvisionOnStartup": true
+      "autoProvisionOnStartup": false
     }
   ]
 }
 ```
 
-Factory-reset the light before first provisioning. With the default config,
-Homebridge runs one startup scan and provisions matching factory-reset TL30
-lights whose advertised name matches `^GD_LED$`.
+With the default config, Homebridge loads registered lights and runs a
+non-provisioning startup scan. It does not provision factory-reset lights unless
+provisioning is explicitly enabled.
+
+To provision from Homebridge, factory-reset the light first, then enable one of
+these options:
+
+- `autoProvisionOnStartup: true` provisions matching factory-reset TL30 lights
+  during the next startup scan.
+- `autoProvision: true` continuously scans every `scanIntervalSeconds` and
+  provisions matching factory-reset TL30 lights.
+
+Provisioning candidates must match `discoveryFilters` (default `^GD_LED$`).
 
 You can also provision lights from the CLI and let Homebridge read that registry,
 but both processes must use the same registry path and Homebridge must be able
@@ -91,7 +101,7 @@ settings form. The platform alias is:
 | `autoProvision`          | `false`               | Continuously scan and provision matching factory-reset lights after startup.                                   |
 | `startupScan`            | `true`                | Run one BLE scan when Homebridge starts.                                                                       |
 | `startupPruneMissing`    | `false`               | Remove registry entries missed by the startup scan. Leave off for normal BLE use; short scans can miss lights. |
-| `autoProvisionOnStartup` | `true`                | Provision matching factory-reset lights during the startup scan even when periodic auto-provision is off.      |
+| `autoProvisionOnStartup` | `false`               | Provision matching factory-reset lights during the startup scan even when periodic auto-provision is off.      |
 | `scanIntervalSeconds`    | `60`                  | Periodic scan interval. Clamped to at least 10 seconds.                                                        |
 | `discoveryFilters`       | `["^GD_LED$"]`        | JavaScript regex patterns matched against advertised BLE names.                                                |
 | `nameTemplate`           | `"godox-{shortAddr}"` | Name assigned to auto-provisioned lights. `{shortAddr}` expands to the last 6 hex chars of the BLE address.    |
@@ -123,6 +133,8 @@ and then resets the switch to off.
   Homebridge.
 - Run `godox scan` on the same host to verify the adapter can see the light.
 - Factory-reset the TL30 if it does not appear as an unprovisioned device.
+- Enable `autoProvisionOnStartup` or `autoProvision` before expecting
+  Homebridge to provision factory-reset lights.
 - Keep `startupPruneMissing` off unless you intentionally want missing scan
   results to remove accessories.
 - Check Homebridge logs for `BLE scan complete`, `Auto-provision candidates`,
