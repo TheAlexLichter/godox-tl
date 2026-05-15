@@ -1,6 +1,6 @@
 {
   "name": "godox-tl-monorepo",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "private": true,
   "description": "Monorepo for Godox TL30 BLE control (core, CLI, mesh transport, Homebridge plugin).",
   "homepage": "https://github.com/TheAlexLichter/godox-tl#readme",
