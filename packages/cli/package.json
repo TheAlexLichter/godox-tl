@@ -1,6 +1,6 @@
 {
   "name": "@godox-tl/cli",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "godox CLI binary built on @effect/cli — scan, provision, CCT, HSI, RGBW, FX, registry, and rebind commands.",
   "homepage": "https://github.com/TheAlexLichter/godox-tl#readme",
   "bugs": {

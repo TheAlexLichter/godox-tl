@@ -1,6 +1,6 @@
 {
   "name": "@godox-tl/core",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Domain types, LightController service, registry, and transport-agnostic factory helpers for Godox TL30 BLE control.",
   "homepage": "https://github.com/TheAlexLichter/godox-tl#readme",
   "bugs": {

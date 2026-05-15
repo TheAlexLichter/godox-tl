@@ -1,7 +1,7 @@
 {
   "name": "homebridge-godox-tl",
   "displayName": "Godox TL",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Homebridge plugin for Godox TL30 BLE control. Exposes brightness, color temperature, HSI color, and optional FX/RGBW presets via BLE SIG Mesh.",
   "keywords": [
     "ble",
