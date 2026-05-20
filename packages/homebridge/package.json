@@ -25,6 +25,16 @@
     "type": "git",
     "url": "git+https://github.com/TheAlexLichter/godox-tl.git"
   },
+  "funding": [
+    {
+      "type": "github",
+      "url": "https://github.com/sponsors/TheAlexLichter/"
+    },
+    {
+      "type": "paypal",
+      "url": "https://www.paypal.me/Lichter"
+    }
+  ],
   "files": [
     "src",
     "dist",
