@@ -6,7 +6,7 @@
 // top of the controller wraps the entire lifetime.
 
 import type { Characteristic, Peripheral } from "@stoprocent/noble";
-import { Effect, type Scope, Stream } from "effect";
+import { Duration, Effect, type Scope, Stream } from "effect";
 import { matchAddress } from "./address.ts";
 import { BleError } from "./errors.ts";
 import { getNoble, type NobleLike, type PeripheralLike, withNobleOperation } from "./noble.ts";
@@ -116,7 +116,7 @@ const discoverProxyCharacteristics = (
         }),
     }).pipe(
       Effect.timeoutFail({
-        duration: `${DISCOVER_TIMEOUT_MS} millis`,
+        duration: Duration.millis(DISCOVER_TIMEOUT_MS),
         onTimeout: () =>
           new BleError({
             message: `Mesh Proxy service discovery hung past ${DISCOVER_TIMEOUT_MS / 1000}s`,
@@ -137,7 +137,7 @@ const discoverProxyCharacteristics = (
       catch: (cause) => new BleError({ cause, message: "discoverCharacteristicsAsync failed" }),
     }).pipe(
       Effect.timeoutFail({
-        duration: `${DISCOVER_TIMEOUT_MS} millis`,
+        duration: Duration.millis(DISCOVER_TIMEOUT_MS),
         onTimeout: () => new BleError({ message: "Characteristic discovery hung" }),
       }),
     );
@@ -165,7 +165,7 @@ const discoverProxyDataIn = (peripheral: Peripheral): Effect.Effect<Characterist
         }),
     }).pipe(
       Effect.timeoutFail({
-        duration: `${DISCOVER_TIMEOUT_MS} millis`,
+        duration: Duration.millis(DISCOVER_TIMEOUT_MS),
         onTimeout: () =>
           new BleError({
             message: `Mesh Proxy service discovery hung past ${DISCOVER_TIMEOUT_MS / 1000}s`,
@@ -185,7 +185,7 @@ const discoverProxyDataIn = (peripheral: Peripheral): Effect.Effect<Characterist
       catch: (cause) => new BleError({ cause, message: "discoverCharacteristicsAsync failed" }),
     }).pipe(
       Effect.timeoutFail({
-        duration: `${DISCOVER_TIMEOUT_MS} millis`,
+        duration: Duration.millis(DISCOVER_TIMEOUT_MS),
         onTimeout: () => new BleError({ message: "Characteristic discovery hung" }),
       }),
     );
@@ -213,9 +213,34 @@ const withBleTimeout = <A>(
 ): Effect.Effect<A, BleError> =>
   effect.pipe(
     Effect.timeoutFail({
-      duration: `${STEP_TIMEOUT_MS} millis`,
+      duration: Duration.millis(STEP_TIMEOUT_MS),
       onTimeout: () => new BleError({ message: `${label} timed out after ${STEP_TIMEOUT_MS}ms` }),
     }),
+  );
+
+const disconnectPeripheral = (peripheral: Peripheral): Effect.Effect<void> =>
+  Effect.promise(() => peripheral.disconnectAsync().catch(() => undefined));
+
+const connectPeripheral = (
+  peripheral: Peripheral,
+  address: string,
+): Effect.Effect<void, BleError> =>
+  withBleTimeout(
+    Effect.tryPromise({
+      try: () => peripheral.connectAsync(),
+      catch: (cause) =>
+        new BleError({
+          cause,
+          message: `Failed to connect to peripheral '${address}'`,
+        }),
+    }),
+    "connectAsync",
+  ).pipe(
+    Effect.tapError((error) =>
+      Effect.logDebug(
+        `[ble] connect failed for ${address}; disconnecting stale peripheral: ${error.message}`,
+      ).pipe(Effect.zipRight(disconnectPeripheral(peripheral))),
+    ),
   );
 
 export const connectProxy = (
@@ -229,29 +254,13 @@ export const connectProxy = (
       yield* Effect.logDebug(`[ble] scanning for ${address}`);
 
       const peripheral = yield* findPeripheral(noble, address);
-      yield* Effect.logDebug(`[ble] found peripheral; connecting`);
+      yield* Effect.logDebug(`[ble] found peripheral; connecting ${address}`);
 
       // Connect with disconnect-on-Scope-close. We acquire the connection
       // here so any subsequent failure (discovery, subscribe) still
       // disconnects on cleanup.
-      yield* Effect.acquireRelease(
-        withBleTimeout(
-          Effect.tryPromise({
-            try: () => peripheral.connectAsync(),
-            catch: (cause) =>
-              new BleError({
-                cause,
-                message: `Failed to connect to peripheral '${address}'`,
-              }),
-          }),
-          "connectAsync",
-        ),
-        () =>
-          Effect.promise(() =>
-            peripheral.disconnectAsync().catch(() => {
-              /* swallow: the peripheral may already be gone */
-            }),
-          ),
+      yield* Effect.acquireRelease(connectPeripheral(peripheral, address), () =>
+        disconnectPeripheral(peripheral),
       );
       yield* Effect.logDebug(`[ble] connected; discovering`);
 
@@ -363,19 +372,9 @@ export const connectProxyWriter = (
       yield* Effect.logDebug(`[ble] scanning for ${address}`);
 
       const peripheral = yield* findPeripheral(noble, address);
-      yield* Effect.logDebug(`[ble] found peripheral; connecting`);
+      yield* Effect.logDebug(`[ble] found peripheral; connecting ${address}`);
 
-      yield* withBleTimeout(
-        Effect.tryPromise({
-          try: () => peripheral.connectAsync(),
-          catch: (cause) =>
-            new BleError({
-              cause,
-              message: `Failed to connect to peripheral '${address}'`,
-            }),
-        }),
-        "connectAsync",
-      );
+      yield* connectPeripheral(peripheral, address);
 
       let closed = false;
       const close = (): Effect.Effect<void> =>

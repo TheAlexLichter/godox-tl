@@ -334,3 +334,74 @@ test("mesh controller serializes queued sends when coalescing is disabled", asyn
   expect(writeCount).toBe(3);
   expect(connectCount).toBe(1);
 });
+
+test("mesh controller times out a hung GATT write and closes the writer", async () => {
+  const statePath = join(dir, "state.json");
+  await Effect.runPromise(saveMeshState(statePath, sampleState(7)));
+
+  let writeCount = 0;
+  let disconnectCount = 0;
+
+  class HangingCharacteristic extends EventEmitter {
+    readonly properties = ["writeWithoutResponse"];
+
+    constructor(readonly uuid: string) {
+      super();
+    }
+
+    writeAsync(): Promise<void> {
+      writeCount++;
+      return new Promise(() => undefined);
+    }
+  }
+
+  class HangingService {
+    readonly uuid = MESH_PROXY_SERVICE_UUID;
+
+    async discoverCharacteristicsAsync(): Promise<HangingCharacteristic[]> {
+      return [new HangingCharacteristic("2add")];
+    }
+  }
+
+  class HangingNoble extends EventEmitter implements NobleLike {
+    state = "poweredOn";
+
+    async startScanningAsync(): Promise<void> {
+      const peripheral: PeripheralLike & {
+        connectAsync: () => Promise<void>;
+        disconnectAsync: () => Promise<void>;
+        discoverServicesAsync: () => Promise<HangingService[]>;
+      } = {
+        id: "aabbccddeeff",
+        uuid: "aabbccddeeff",
+        address: "AA:BB:CC:DD:EE:FF",
+        advertisement: { localName: "GD_LED", serviceUuids: [MESH_PROXY_SERVICE_UUID] },
+        connectAsync: async () => {},
+        disconnectAsync: async () => {
+          disconnectCount++;
+        },
+        discoverServicesAsync: async () => [new HangingService()],
+      };
+      queueMicrotask(() => this.emit("discover", peripheral));
+    }
+
+    async stopScanningAsync(): Promise<void> {}
+  }
+
+  __setNobleForTesting(new HangingNoble());
+  const controller = makeMeshController({
+    address: "AA:BB:CC:DD:EE:FF",
+    statePath,
+    writeTimeoutMs: 25,
+  });
+
+  const exit = await Effect.runPromiseExit(
+    controller.send(Cct.make({ brightness: pct(10), temperature: kelvin(3200) })),
+  );
+
+  const state = await Effect.runPromise(loadMeshState(statePath));
+  expect(exit._tag).toBe("Failure");
+  expect(writeCount).toBe(1);
+  expect(disconnectCount).toBe(1);
+  expect(state.sequenceNumber).toBe(8);
+});

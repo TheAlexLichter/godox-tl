@@ -265,6 +265,44 @@ test("connectProxyWriter: disconnects when discovery fails after connect", async
   expect(disconnectCount).toBe(1);
 });
 
+test("connectProxyWriter: disconnects when connect fails", async () => {
+  let disconnectCount = 0;
+
+  class ConnectFailureNoble extends EventEmitter implements NobleLike {
+    state = "poweredOn";
+
+    async startScanningAsync(): Promise<void> {
+      const peripheral: PeripheralLike & {
+        connectAsync: () => Promise<void>;
+        disconnectAsync: () => Promise<void>;
+        discoverServicesAsync: () => Promise<never[]>;
+      } = {
+        id: "aabbccddeeff",
+        uuid: "aabbccddeeff",
+        address: "AA:BB:CC:DD:EE:FF",
+        advertisement: { localName: "GD_LED", serviceUuids: [MESH_PROXY_SERVICE_UUID] },
+        connectAsync: async () => {
+          throw new Error("connect refused");
+        },
+        disconnectAsync: async () => {
+          disconnectCount++;
+        },
+        discoverServicesAsync: async () => [],
+      };
+      queueMicrotask(() => this.emit("discover", peripheral));
+    }
+
+    async stopScanningAsync(): Promise<void> {}
+  }
+
+  __setNobleForTesting(new ConnectFailureNoble());
+
+  const exit = await Effect.runPromiseExit(connectProxyWriter("AA:BB:CC:DD:EE:FF"));
+
+  expect(exit._tag).toBe("Failure");
+  expect(disconnectCount).toBe(1);
+});
+
 // --- Hardware path (skipped by default) -----------------------------------
 
 test.skipIf(!hardwareAvailable)(

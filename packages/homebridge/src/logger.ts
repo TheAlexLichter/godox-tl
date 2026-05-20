@@ -46,12 +46,12 @@ const makeHomebridgeEffectLogger = (hbLog: HomebridgeLogger) =>
   });
 
 /** Replaces Effect's default logger with one that hits Homebridge.
- * Also keeps the minimum log level at Info so Debug lines are suppressed
- * unless `LogLevel.Debug` is provided by the surrounding env. */
+ * Keep Effect at Debug so `hbLog.debug` can decide whether debug lines are
+ * printed for the current Homebridge log mode. */
 export const homebridgeLoggerLayer = (hbLog: HomebridgeLogger): Layer.Layer<never> =>
   Layer.merge(
     EffectLogger.replace(EffectLogger.defaultLogger, makeHomebridgeEffectLogger(hbLog)),
-    EffectLogger.minimumLogLevel(LogLevel.Info),
+    EffectLogger.minimumLogLevel(LogLevel.Debug),
   );
 
 export type { HomebridgeLogger };

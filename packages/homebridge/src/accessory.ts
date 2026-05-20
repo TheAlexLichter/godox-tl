@@ -52,6 +52,17 @@ const cloneState = (state: CommandState): CommandState => ({
   fx: { ...state.fx },
 });
 
+const formatHomeKitValue = (value: unknown): string => {
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return `${value}`;
+  if (value === null || value === undefined) return `${value}`;
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return "[unserializable]";
+  }
+};
+
 const RESTORE_ECHO_SUPPRESSION_MS = 1_500;
 type HomeKitCharacteristic = NonNullable<ReturnType<Service["getCharacteristic"]>>;
 
@@ -118,6 +129,7 @@ export class GodoxLightAccessory {
     this.service
       .getCharacteristic(this.hap.Characteristic.On)
       .onSet((v) => {
+        this.log.debug(`[${this.entry.name}] HomeKit set On=${formatHomeKitValue(v)}`);
         if (v) {
           this.state = cloneState({ ...this.lastActiveState, on: true });
           this.suppressColorTemperatureEchoFor(this.state.mode);
@@ -135,6 +147,7 @@ export class GodoxLightAccessory {
     this.service
       .getCharacteristic(this.hap.Characteristic.Brightness)
       .onSet((v) => {
+        this.log.debug(`[${this.entry.name}] HomeKit set Brightness=${formatHomeKitValue(v)}`);
         this.state.brightness = Math.max(0, Math.min(100, Math.round(Number(v))));
         if (this.state.brightness > 0) this.state.on = true;
         this.queue();
@@ -148,6 +161,9 @@ export class GodoxLightAccessory {
 
     colorTemperature
       .onSet((v) => {
+        this.log.debug(
+          `[${this.entry.name}] HomeKit set ColorTemperature=${formatHomeKitValue(v)}`,
+        );
         this.state.on = true;
         if (this.shouldSuppressColorTemperatureModeSwitch()) {
           this.state.mode = this.restoredMode ?? this.state.mode;
@@ -168,6 +184,7 @@ export class GodoxLightAccessory {
         .getCharacteristic(this.hap.Characteristic.Hue)
         .setProps({ minValue: 0, maxValue: 360 })
         .onSet((v) => {
+          this.log.debug(`[${this.entry.name}] HomeKit set Hue=${formatHomeKitValue(v)}`);
           this.state.hue = Math.max(0, Math.min(360, Math.round(Number(v))));
           this.state.on = true;
           this.state.mode = "hsi";
@@ -181,6 +198,7 @@ export class GodoxLightAccessory {
         .getCharacteristic(this.hap.Characteristic.Saturation)
         .setProps({ minValue: 0, maxValue: 100 })
         .onSet((v) => {
+          this.log.debug(`[${this.entry.name}] HomeKit set Saturation=${formatHomeKitValue(v)}`);
           this.state.saturation = Math.max(0, Math.min(100, Math.round(Number(v))));
           this.state.on = true;
           this.state.mode = "hsi";
@@ -239,6 +257,7 @@ export class GodoxLightAccessory {
     if (this.state.on) {
       this.lastActiveState = cloneState(this.state);
     }
+    this.log.debug(`[${this.entry.name}] queue ${this.stateSummary(this.state)}`);
     this.debouncer.schedule({ ...this.state });
   }
 
@@ -284,7 +303,13 @@ export class GodoxLightAccessory {
   }
 
   private send(s: CommandState): void {
-    this.runCommand(this.commandForState(s));
+    const cmd = this.commandForState(s);
+    this.log.debug(`[${this.entry.name}] send ${cmd._tag} ${this.stateSummary(s)}`);
+    this.runCommand(cmd);
+  }
+
+  private stateSummary(s: CommandState): string {
+    return `on=${s.on} mode=${s.mode} brightness=${s.brightness} mireds=${s.mireds} hue=${s.hue} saturation=${s.saturation}`;
   }
 
   private commandForState(s: CommandState): Domain.LightCommand {

@@ -3,7 +3,7 @@
 // Mesh Proxy connection, and persists the bumped sequence number.
 
 import { Domain, LightController, TransportError, TransportUnsupportedError } from "@godox-tl/core";
-import { Effect, Match } from "effect";
+import { Duration, Effect, Match } from "effect";
 import { connectProxyWriter } from "./ble/proxy.ts";
 import type { ProxyWriterConnection } from "./ble/types.ts";
 import {
@@ -28,6 +28,10 @@ export interface MeshControllerOptions {
   readonly persistentConnection?: boolean;
   /** Idle time before a cached proxy connection is closed. Defaults to 30s. */
   readonly connectionIdleMs?: number;
+  /** Timeout for a single GATT write. Defaults to 5s. */
+  readonly writeTimeoutMs?: number;
+  /** Hard timeout for one queued send, including scan/connect/discovery/write. Defaults to 30s. */
+  readonly sendTimeoutMs?: number;
   /** Collapse queued in-flight sends to the newest command. Defaults to true for persistent connections. */
   readonly coalesce?: boolean;
 }
@@ -101,6 +105,8 @@ export const makeMeshController = (options: MeshControllerOptions): LightControl
   const persistent = options.persistentConnection ?? true;
   const coalesce = options.coalesce ?? persistent;
   const idleMs = Math.max(0, options.connectionIdleMs ?? 30_000);
+  const writeTimeoutMs = Math.max(1, options.writeTimeoutMs ?? 5_000);
+  const sendTimeoutMs = Math.max(1, options.sendTimeoutMs ?? 30_000);
   const stateMutex = mutexForStatePath(options.statePath);
 
   let writer: ProxyWriterConnection | undefined;
@@ -135,22 +141,60 @@ export const makeMeshController = (options: MeshControllerOptions): LightControl
   };
 
   const writerForSend = (): Effect.Effect<ProxyWriterConnection, TransportError> => {
-    if (writer && persistent) return Effect.succeed(writer);
-    return connectProxyWriter(options.address).pipe(
+    if (writer && persistent) {
+      return Effect.logDebug(`[mesh] reusing writer for ${options.address}`).pipe(
+        Effect.as(writer),
+      );
+    }
+    const startedAt = Date.now();
+    return Effect.logDebug(`[mesh] opening writer for ${options.address}`).pipe(
+      Effect.zipRight(connectProxyWriter(options.address)),
       Effect.tap((conn) =>
         Effect.sync(() => {
           writer = conn;
         }),
       ),
+      Effect.tap(() =>
+        Effect.logDebug(
+          `[mesh] writer ready for ${options.address} in ${Date.now() - startedAt}ms`,
+        ),
+      ),
       Effect.mapError((e) => transportError(options.address, e)),
     );
   };
+
+  const withSendTimeout = (
+    cmd: Domain.LightCommand,
+  ): Effect.Effect<void, TransportError | TransportUnsupportedError> =>
+    sendNow(cmd).pipe(
+      Effect.timeoutFail({
+        duration: Duration.millis(sendTimeoutMs),
+        onTimeout: () =>
+          transportError(
+            options.address,
+            new Error(`${cmd._tag} send timed out after ${sendTimeoutMs}ms`),
+          ),
+      }),
+      Effect.tapError(() => Effect.promise(closeWriter)),
+    );
 
   const writePdu = (proxyPdu: Uint8Array): Effect.Effect<void, TransportError> =>
     Effect.gen(function* () {
       clearIdleTimer();
       const conn = yield* writerForSend();
-      yield* conn.write(proxyPdu).pipe(Effect.mapError((e) => transportError(options.address, e)));
+      const startedAt = Date.now();
+      yield* Effect.logDebug(`[mesh] writing ${proxyPdu.byteLength} bytes to ${options.address}`);
+      yield* conn.write(proxyPdu).pipe(
+        Effect.mapError((e) => transportError(options.address, e)),
+        Effect.timeoutFail({
+          duration: Duration.millis(writeTimeoutMs),
+          onTimeout: () =>
+            transportError(options.address, new Error(`write timed out after ${writeTimeoutMs}ms`)),
+        }),
+      );
+      yield* Effect.logDebug(
+        `[mesh] write complete for ${options.address} in ${Date.now() - startedAt}ms`,
+      );
       yield* Effect.sleep("100 millis");
       yield* Effect.sync(scheduleIdleClose);
     }).pipe(
@@ -213,7 +257,9 @@ export const makeMeshController = (options: MeshControllerOptions): LightControl
       }).pipe(stateMutex.withPermits(1));
 
       if (!options.dryRun) {
+        yield* Effect.logDebug(`[mesh] sending ${cmd._tag} to ${options.address}`);
         yield* writePdu(proxyPdu);
+        yield* Effect.logDebug(`[mesh] sent ${cmd._tag} to ${options.address}`);
       }
     });
 
@@ -228,7 +274,7 @@ export const makeMeshController = (options: MeshControllerOptions): LightControl
   };
 
   const runQueued = (cmd: Domain.LightCommand, waiters: ReadonlyArray<SendWaiter>): void => {
-    inFlight = Effect.runPromise(sendNow(cmd))
+    inFlight = Effect.runPromise(withSendTimeout(cmd))
       .then(() => settle(waiters))
       .catch((error: unknown) => settle(waiters, error))
       .then(() => {
