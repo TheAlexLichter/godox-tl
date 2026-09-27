@@ -125,7 +125,9 @@ export const makeMeshController = (options: MeshControllerOptions): LightControl
     const current = writer;
     writer = undefined;
     if (!current) return Promise.resolve();
-    return Effect.runPromise(current.close()).catch(() => undefined);
+    return Effect.runPromise(current.close()).catch(() =>
+      Effect.runPromise(current.close()).catch(() => undefined),
+    );
   };
 
   const scheduleIdleClose = (): void => {

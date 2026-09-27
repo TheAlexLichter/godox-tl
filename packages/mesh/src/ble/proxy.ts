@@ -206,6 +206,7 @@ const discoverProxyDataIn = (peripheral: Peripheral): Effect.Effect<Characterist
  * Scope closes, notifications are stopped and the peripheral is disconnected.
  */
 const STEP_TIMEOUT_MS = 15_000;
+const DISCONNECT_TIMEOUT_MS = 3_000;
 
 const withBleTimeout = <A>(
   effect: Effect.Effect<A, BleError>,
@@ -218,8 +219,31 @@ const withBleTimeout = <A>(
     }),
   );
 
-const disconnectPeripheral = (peripheral: Peripheral): Effect.Effect<void> =>
-  Effect.promise(() => peripheral.disconnectAsync().catch(() => undefined));
+const disconnectPeripheral = (peripheral: Peripheral): Effect.Effect<void, BleError> =>
+  Effect.tryPromise({
+    try: async () => {
+      if (peripheral.state === "connecting") {
+        peripheral.cancelConnect();
+        return;
+      }
+      if (peripheral.state === "disconnected" || peripheral.state === "error") return;
+
+      let timer: NodeJS.Timeout | undefined;
+      try {
+        const disconnected = await Promise.race([
+          peripheral.disconnectAsync().then(() => true),
+          new Promise<boolean>((resolve) => {
+            timer = setTimeout(() => resolve(false), DISCONNECT_TIMEOUT_MS);
+          }),
+        ]);
+        if (!disconnected) throw new Error(`disconnect timed out after ${DISCONNECT_TIMEOUT_MS}ms`);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    },
+    catch: (cause) =>
+      new BleError({ cause, message: `Failed to close BLE connection: ${String(cause)}` }),
+  }).pipe(Effect.tapError((error) => Effect.logWarning(`[ble] ${error.message}`)));
 
 const connectPeripheral = (
   peripheral: Peripheral,
@@ -238,7 +262,7 @@ const connectPeripheral = (
   ).pipe(
     Effect.tapError((error) =>
       Effect.logDebug(
-        `[ble] connect failed for ${address}; disconnecting stale peripheral: ${error.message}`,
+        `[ble] connect failed for ${address}; cleaning up peripheral: ${error.message}`,
       ).pipe(Effect.zipRight(disconnectPeripheral(peripheral))),
     ),
   );
@@ -260,7 +284,7 @@ export const connectProxy = (
       // here so any subsequent failure (discovery, subscribe) still
       // disconnects on cleanup.
       yield* Effect.acquireRelease(connectPeripheral(peripheral, address), () =>
-        disconnectPeripheral(peripheral),
+        disconnectPeripheral(peripheral).pipe(Effect.catchAll(() => Effect.void)),
       );
       yield* Effect.logDebug(`[ble] connected; discovering`);
 
@@ -377,11 +401,11 @@ export const connectProxyWriter = (
       yield* connectPeripheral(peripheral, address);
 
       let closed = false;
-      const close = (): Effect.Effect<void> =>
-        Effect.promise(async () => {
+      const close = (): Effect.Effect<void, BleError> =>
+        Effect.gen(function* () {
           if (closed) return;
+          yield* disconnectPeripheral(peripheral);
           closed = true;
-          await peripheral.disconnectAsync().catch(() => undefined);
         });
 
       yield* Effect.logDebug(`[ble] connected; discovering Data In`);
