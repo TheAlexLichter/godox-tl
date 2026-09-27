@@ -303,9 +303,29 @@ const openProxyPeripheral = (
     const directConnect = noble.connectAsync?.bind(noble);
     if (addressType && directConnect) {
       yield* Effect.logDebug(`[ble] connecting directly to ${address} (${addressType})`);
+      let abandoned = false;
+      const cancelDirect = (): void => {
+        abandoned = true;
+        try {
+          noble.cancelConnect?.(address);
+        } catch {
+          // Continue with discovery even if Noble has already cleared the attempt.
+        }
+      };
+      const pending = Promise.resolve().then(() => directConnect(address, { addressType }));
+      void pending.then(
+        (peripheral) => {
+          if (abandoned && peripheral) {
+            void Effect.runPromise(disconnectPeripheral(peripheral as Peripheral)).catch(
+              () => undefined,
+            );
+          }
+        },
+        () => undefined,
+      );
       const direct = yield* Effect.tryPromise({
         try: async () => {
-          const peripheral = await directConnect(address, { addressType });
+          const peripheral = await pending;
           if (!peripheral) throw new Error("Noble returned no peripheral");
           return peripheral as Peripheral;
         },
@@ -314,24 +334,19 @@ const openProxyPeripheral = (
       }).pipe(
         Effect.timeoutFail({
           duration: Duration.millis(DIRECT_CONNECT_TIMEOUT_MS),
-          onTimeout: () =>
-            new BleError({
+          onTimeout: () => {
+            abandoned = true;
+            return new BleError({
               message: `Direct BLE connection to ${address} timed out after ${DIRECT_CONNECT_TIMEOUT_MS}ms`,
-            }),
+            });
+          },
         }),
         Effect.tapError((error) =>
           Effect.logDebug(`[ble] ${error.message}; falling back to scan`).pipe(
-            Effect.zipRight(
-              Effect.sync(() => {
-                try {
-                  noble.cancelConnect?.(address);
-                } catch {
-                  // Continue with discovery even if Noble has already cleared the attempt.
-                }
-              }),
-            ),
+            Effect.zipRight(Effect.sync(cancelDirect)),
           ),
         ),
+        Effect.onInterrupt(() => Effect.sync(cancelDirect)),
         Effect.orElseSucceed(() => undefined),
       );
       if (direct) return { peripheral: direct, direct: true };

@@ -509,6 +509,65 @@ test("connectProxyWriter: scans if direct connection fails", async () => {
   await Effect.runPromise(connection.close());
 });
 
+test("connectProxyWriter: closes a direct connection that succeeds after timeout", async () => {
+  let resolveDirect!: (peripheral: PeripheralLike) => void;
+  let markLateDisconnected!: () => void;
+  const pendingDirect = new Promise<PeripheralLike>((resolve) => {
+    resolveDirect = resolve;
+  });
+  const lateDisconnected = new Promise<void>((resolve) => {
+    markLateDisconnected = resolve;
+  });
+  let scanCount = 0;
+
+  const service = {
+    uuid: MESH_PROXY_SERVICE_UUID,
+    discoverCharacteristicsAsync: async () => [
+      { uuid: "2add", properties: ["writeWithoutResponse"] },
+    ],
+  };
+  const latePeripheral = {
+    address: "A4:C1:38:21:09:80",
+    state: "connected",
+    disconnectAsync: async () => markLateDisconnected(),
+  };
+  const scannedPeripheral = {
+    address: "A4:C1:38:21:09:80",
+    state: "disconnected",
+    connectAsync: async () => {},
+    disconnectAsync: async () => {},
+    discoverServicesAsync: async () => [service],
+  };
+
+  class LateNoble extends EventEmitter implements NobleLike {
+    state = "poweredOn";
+
+    connectAsync(): Promise<PeripheralLike> {
+      return pendingDirect;
+    }
+
+    cancelConnect(): void {
+      queueMicrotask(() => resolveDirect(latePeripheral));
+    }
+
+    async startScanningAsync(): Promise<void> {
+      scanCount++;
+      queueMicrotask(() => this.emit("discover", scannedPeripheral));
+    }
+
+    async stopScanningAsync(): Promise<void> {}
+  }
+
+  __setNobleForTesting(new LateNoble());
+  const connection = await Effect.runPromise(
+    connectProxyWriter("A4:C1:38:21:09:80", { directAddressType: "public" }),
+  );
+
+  expect(scanCount).toBe(1);
+  await lateDisconnected;
+  await Effect.runPromise(connection.close());
+}, 12_000);
+
 // --- Hardware path (skipped by default) -----------------------------------
 
 test.skipIf(!hardwareAvailable)(
