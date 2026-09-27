@@ -39,6 +39,11 @@ export type NobleListener = (...args: any[]) => void;
 
 export interface NobleLike {
   readonly state: string;
+  connectAsync?(
+    address: string,
+    options?: { readonly addressType?: "public" | "random" },
+  ): Promise<PeripheralLike>;
+  cancelConnect?(address: string): void;
   startScanningAsync(
     serviceUuids?: ReadonlyArray<string>,
     allowDuplicates?: boolean,

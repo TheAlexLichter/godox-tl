@@ -14,11 +14,19 @@ import {
   scanDevices,
 } from "../src/ble/index.ts";
 import type { NobleLike, PeripheralLike } from "../src/ble/noble.ts";
+import { inferredDirectAddressType } from "../src/ble/proxy.ts";
 
 const hardwareAvailable = process.env.MESH_BLE_AVAILABLE === "1";
 
 afterEach(() => {
   __setNobleForTesting(undefined);
+});
+
+test("direct connection infers only unambiguous Linux public addresses", () => {
+  expect(inferredDirectAddressType("A4:C1:38:21:09:80", "linux")).toBe("public");
+  expect(inferredDirectAddressType("A4:C1:38:21:09:80", "darwin")).toBeUndefined();
+  expect(inferredDirectAddressType("C4:C1:38:21:09:80", "linux")).toBeUndefined();
+  expect(inferredDirectAddressType("not-an-address", "linux")).toBeUndefined();
 });
 
 // --- buildDiscoveredDevice -------------------------------------------------
@@ -407,6 +415,99 @@ test("connectProxyWriter: a timed-out close can be retried", async () => {
   await Effect.runPromise(connection.close());
   expect(disconnectCount).toBe(2);
 }, 10_000);
+
+test("connectProxyWriter: direct connection skips scanning when address type is known", async () => {
+  let scanCount = 0;
+  let directCount = 0;
+
+  class DirectNoble extends EventEmitter implements NobleLike {
+    state = "poweredOn";
+
+    async connectAsync(_address: string, options?: { readonly addressType?: "public" | "random" }) {
+      directCount++;
+      expect(options?.addressType).toBe("public");
+      return {
+        address: "A4:C1:38:21:09:80",
+        state: "connected",
+        disconnectAsync: async () => {},
+        discoverServicesAsync: async () => [
+          {
+            uuid: MESH_PROXY_SERVICE_UUID,
+            discoverCharacteristicsAsync: async () => [
+              { uuid: "2add", properties: ["writeWithoutResponse"] },
+            ],
+          },
+        ],
+      };
+    }
+
+    async startScanningAsync(): Promise<void> {
+      scanCount++;
+    }
+
+    async stopScanningAsync(): Promise<void> {}
+  }
+
+  __setNobleForTesting(new DirectNoble());
+  const connection = await Effect.runPromise(
+    connectProxyWriter("A4:C1:38:21:09:80", { directAddressType: "public" }),
+  );
+
+  expect(directCount).toBe(1);
+  expect(scanCount).toBe(0);
+  await Effect.runPromise(connection.close());
+});
+
+test("connectProxyWriter: scans if direct connection fails", async () => {
+  let scanCount = 0;
+  let cancelCount = 0;
+  let peripheralConnectCount = 0;
+
+  class FallbackNoble extends EventEmitter implements NobleLike {
+    state = "poweredOn";
+
+    async connectAsync(): Promise<PeripheralLike> {
+      throw new Error("direct connection unavailable");
+    }
+
+    cancelConnect(): void {
+      cancelCount++;
+    }
+
+    async startScanningAsync(): Promise<void> {
+      scanCount++;
+      const peripheral = {
+        address: "A4:C1:38:21:09:80",
+        state: "connected",
+        connectAsync: async () => {
+          peripheralConnectCount++;
+        },
+        disconnectAsync: async () => {},
+        discoverServicesAsync: async () => [
+          {
+            uuid: MESH_PROXY_SERVICE_UUID,
+            discoverCharacteristicsAsync: async () => [
+              { uuid: "2add", properties: ["writeWithoutResponse"] },
+            ],
+          },
+        ],
+      };
+      queueMicrotask(() => this.emit("discover", peripheral));
+    }
+
+    async stopScanningAsync(): Promise<void> {}
+  }
+
+  __setNobleForTesting(new FallbackNoble());
+  const connection = await Effect.runPromise(
+    connectProxyWriter("A4:C1:38:21:09:80", { directAddressType: "public" }),
+  );
+
+  expect(scanCount).toBe(1);
+  expect(cancelCount).toBe(1);
+  expect(peripheralConnectCount).toBe(1);
+  await Effect.runPromise(connection.close());
+});
 
 // --- Hardware path (skipped by default) -----------------------------------
 
