@@ -265,7 +265,7 @@ test("connectProxyWriter: disconnects when discovery fails after connect", async
   expect(disconnectCount).toBe(1);
 });
 
-test("connectProxyWriter: disconnects when connect fails", async () => {
+test("connectProxyWriter: does not disconnect a failed connection with no link", async () => {
   let disconnectCount = 0;
 
   class ConnectFailureNoble extends EventEmitter implements NobleLike {
@@ -273,6 +273,7 @@ test("connectProxyWriter: disconnects when connect fails", async () => {
 
     async startScanningAsync(): Promise<void> {
       const peripheral: PeripheralLike & {
+        state: string;
         connectAsync: () => Promise<void>;
         disconnectAsync: () => Promise<void>;
         discoverServicesAsync: () => Promise<never[]>;
@@ -280,6 +281,7 @@ test("connectProxyWriter: disconnects when connect fails", async () => {
         id: "aabbccddeeff",
         uuid: "aabbccddeeff",
         address: "AA:BB:CC:DD:EE:FF",
+        state: "error",
         advertisement: { localName: "GD_LED", serviceUuids: [MESH_PROXY_SERVICE_UUID] },
         connectAsync: async () => {
           throw new Error("connect refused");
@@ -300,8 +302,111 @@ test("connectProxyWriter: disconnects when connect fails", async () => {
   const exit = await Effect.runPromiseExit(connectProxyWriter("AA:BB:CC:DD:EE:FF"));
 
   expect(exit._tag).toBe("Failure");
-  expect(disconnectCount).toBe(1);
+  expect(disconnectCount).toBe(0);
 });
+
+test("connectProxyWriter: cancels a failed in-progress connection", async () => {
+  let cancelCount = 0;
+  let disconnectCount = 0;
+
+  class ConnectingNoble extends EventEmitter implements NobleLike {
+    state = "poweredOn";
+
+    async startScanningAsync(): Promise<void> {
+      const peripheral = {
+        id: "aabbccddeeff",
+        address: "AA:BB:CC:DD:EE:FF",
+        state: "connecting",
+        connectAsync: async () => {
+          throw new Error("connection failed");
+        },
+        cancelConnect: () => {
+          cancelCount++;
+        },
+        disconnectAsync: async () => {
+          disconnectCount++;
+        },
+      };
+      queueMicrotask(() => this.emit("discover", peripheral));
+    }
+
+    async stopScanningAsync(): Promise<void> {}
+  }
+
+  __setNobleForTesting(new ConnectingNoble());
+  const exit = await Effect.runPromiseExit(connectProxyWriter("AA:BB:CC:DD:EE:FF"));
+
+  expect(exit._tag).toBe("Failure");
+  expect(cancelCount).toBe(1);
+  expect(disconnectCount).toBe(0);
+});
+
+test("connectProxyWriter: a stuck disconnect does not hold the BLE operation queue", async () => {
+  class StuckDisconnectNoble extends EventEmitter implements NobleLike {
+    state = "poweredOn";
+
+    async startScanningAsync(): Promise<void> {
+      const peripheral = {
+        id: "aabbccddeeff",
+        address: "AA:BB:CC:DD:EE:FF",
+        state: "connected",
+        connectAsync: async () => {},
+        disconnectAsync: () => new Promise<void>(() => {}),
+        discoverServicesAsync: async () => [],
+      };
+      queueMicrotask(() => this.emit("discover", peripheral));
+    }
+
+    async stopScanningAsync(): Promise<void> {}
+  }
+
+  __setNobleForTesting(new StuckDisconnectNoble());
+  const startedAt = Date.now();
+  const exit = await Effect.runPromiseExit(connectProxyWriter("AA:BB:CC:DD:EE:FF"));
+
+  expect(exit._tag).toBe("Failure");
+  expect(Date.now() - startedAt).toBeLessThan(8_000);
+}, 10_000);
+
+test("connectProxyWriter: a timed-out close can be retried", async () => {
+  let disconnectCount = 0;
+
+  class RetryDisconnectNoble extends EventEmitter implements NobleLike {
+    state = "poweredOn";
+
+    async startScanningAsync(): Promise<void> {
+      const peripheral = {
+        id: "aabbccddeeff",
+        address: "AA:BB:CC:DD:EE:FF",
+        state: "connected",
+        connectAsync: async () => {},
+        disconnectAsync: () => {
+          disconnectCount++;
+          return disconnectCount === 1 ? new Promise<void>(() => {}) : Promise.resolve();
+        },
+        discoverServicesAsync: async () => [
+          {
+            uuid: MESH_PROXY_SERVICE_UUID,
+            discoverCharacteristicsAsync: async () => [
+              { uuid: "2add", properties: ["writeWithoutResponse"] },
+            ],
+          },
+        ],
+      };
+      queueMicrotask(() => this.emit("discover", peripheral));
+    }
+
+    async stopScanningAsync(): Promise<void> {}
+  }
+
+  __setNobleForTesting(new RetryDisconnectNoble());
+  const connection = await Effect.runPromise(connectProxyWriter("AA:BB:CC:DD:EE:FF"));
+
+  const firstClose = await Effect.runPromiseExit(connection.close());
+  expect(firstClose._tag).toBe("Failure");
+  await Effect.runPromise(connection.close());
+  expect(disconnectCount).toBe(2);
+}, 10_000);
 
 // --- Hardware path (skipped by default) -----------------------------------
 
