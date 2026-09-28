@@ -1,6 +1,7 @@
 // Open a Mesh Proxy GATT connection to a previously discovered peripheral.
 //
-// Port of upstream `client.ProxyClient`: scan → match address → connect →
+// Port of upstream `client.ProxyClient`: connect directly when the address
+// type is known, otherwise scan → match address → connect →
 // discover (0x1828, [0x2add, 0x2ade]) → subscribe(0x2ade). All cleanup is
 // attached to the caller-provided Scope so a single `Effect.scoped` at the
 // top of the controller wraps the entire lifetime.
@@ -18,6 +19,25 @@ const MESH_PROXY_DATA_OUT_UUID = "2ade"; // server → proxy client (notificatio
 
 const FIND_PERIPHERAL_TIMEOUT_MS = 20_000;
 const POWERED_ON_TIMEOUT_MS = 5_000;
+const DIRECT_CONNECT_TIMEOUT_MS = 4_000;
+
+export interface ProxyConnectOptions {
+  /** Override address-type inference for a direct connection attempt. */
+  readonly directAddressType?: "public" | "random";
+}
+
+// A random BLE address cannot start with bit pattern 10 (reserved by the
+// Bluetooth spec), so a Linux MAC in this range is unambiguously public.
+// All other addresses keep the scan path unless their type is supplied.
+export const inferredDirectAddressType = (
+  address: string,
+  platform: NodeJS.Platform = process.platform,
+): "public" | undefined => {
+  if (platform !== "linux") return undefined;
+  const firstOctet = /^([0-9a-f]{2})(?::[0-9a-f]{2}){5}$/i.exec(address)?.[1];
+  if (!firstOctet) return undefined;
+  return (Number.parseInt(firstOctet, 16) & 0xc0) === 0x80 ? "public" : undefined;
+};
 
 const waitPoweredOn = (noble: NobleLike): Effect.Effect<void, BleError> =>
   Effect.async<void, BleError>((resume) => {
@@ -97,16 +117,16 @@ const findPeripheral = (noble: NobleLike, address: string): Effect.Effect<Periph
 const POST_CONNECT_SETTLE_MS = 3_000;
 const DISCOVER_TIMEOUT_MS = 15_000;
 
-// Telink-aware: same quirk as `ble/provisioning.ts` — short settle window
-// after connect, then a targeted `discoverServicesAsync([UUID])` (Find By
-// Type Value, not Read By Group Type) followed by per-service
-// `discoverCharacteristicsAsync`. The broad discoverAll path hangs forever
-// on these chips.
+// Telink-aware: keep the settle window on scanned connections. Direct
+// connections worked with immediate discovery on both Godox lights. Targeted
+// `discoverServicesAsync([UUID])` uses Find By Type Value; broad discoverAll
+// hangs on these chips.
 const discoverProxyCharacteristics = (
   peripheral: Peripheral,
+  settleMs: number,
 ): Effect.Effect<{ readonly dataIn: Characteristic; readonly dataOut: Characteristic }, BleError> =>
   Effect.gen(function* () {
-    yield* Effect.sleep(`${POST_CONNECT_SETTLE_MS} millis`);
+    if (settleMs > 0) yield* Effect.sleep(`${settleMs} millis`);
     const services = yield* Effect.tryPromise({
       try: () => peripheral.discoverServicesAsync([MESH_PROXY_SERVICE_UUID]),
       catch: (cause) =>
@@ -153,9 +173,12 @@ const discoverProxyCharacteristics = (
     return { dataIn, dataOut };
   });
 
-const discoverProxyDataIn = (peripheral: Peripheral): Effect.Effect<Characteristic, BleError> =>
+const discoverProxyDataIn = (
+  peripheral: Peripheral,
+  settleMs: number,
+): Effect.Effect<Characteristic, BleError> =>
   Effect.gen(function* () {
-    yield* Effect.sleep(`${POST_CONNECT_SETTLE_MS} millis`);
+    if (settleMs > 0) yield* Effect.sleep(`${settleMs} millis`);
     const services = yield* Effect.tryPromise({
       try: () => peripheral.discoverServicesAsync([MESH_PROXY_SERVICE_UUID]),
       catch: (cause) =>
@@ -267,29 +290,96 @@ const connectPeripheral = (
     ),
   );
 
+const openProxyPeripheral = (
+  noble: NobleLike,
+  address: string,
+  options: ProxyConnectOptions,
+): Effect.Effect<{ readonly peripheral: Peripheral; readonly direct: boolean }, BleError> =>
+  Effect.gen(function* () {
+    yield* Effect.logDebug(`[ble] waitPoweredOn`);
+    yield* waitPoweredOn(noble);
+
+    const addressType = options.directAddressType ?? inferredDirectAddressType(address);
+    const directConnect = noble.connectAsync?.bind(noble);
+    if (addressType && directConnect) {
+      yield* Effect.logDebug(`[ble] connecting directly to ${address} (${addressType})`);
+      let abandoned = false;
+      const cancelDirect = (): void => {
+        abandoned = true;
+        try {
+          noble.cancelConnect?.(address);
+        } catch {
+          // Continue with discovery even if Noble has already cleared the attempt.
+        }
+      };
+      const pending = Promise.resolve().then(() => directConnect(address, { addressType }));
+      void pending.then(
+        (peripheral) => {
+          if (abandoned && peripheral) {
+            void Effect.runPromise(disconnectPeripheral(peripheral as Peripheral)).catch(
+              () => undefined,
+            );
+          }
+        },
+        () => undefined,
+      );
+      const direct = yield* Effect.tryPromise({
+        try: async () => {
+          const peripheral = await pending;
+          if (!peripheral) throw new Error("Noble returned no peripheral");
+          return peripheral as Peripheral;
+        },
+        catch: (cause) =>
+          new BleError({ cause, message: `Direct BLE connection to ${address} failed` }),
+      }).pipe(
+        Effect.timeoutFail({
+          duration: Duration.millis(DIRECT_CONNECT_TIMEOUT_MS),
+          onTimeout: () => {
+            abandoned = true;
+            return new BleError({
+              message: `Direct BLE connection to ${address} timed out after ${DIRECT_CONNECT_TIMEOUT_MS}ms`,
+            });
+          },
+        }),
+        Effect.tapError((error) =>
+          Effect.logDebug(`[ble] ${error.message}; falling back to scan`).pipe(
+            Effect.zipRight(Effect.sync(cancelDirect)),
+          ),
+        ),
+        Effect.onInterrupt(() => Effect.sync(cancelDirect)),
+        Effect.orElseSucceed(() => undefined),
+      );
+      if (direct) return { peripheral: direct, direct: true };
+    }
+
+    yield* Effect.logDebug(`[ble] scanning for ${address}`);
+    const peripheral = yield* findPeripheral(noble, address);
+    yield* Effect.logDebug(`[ble] found peripheral; connecting ${address}`);
+    yield* connectPeripheral(peripheral, address);
+    return { peripheral, direct: false };
+  });
+
 export const connectProxy = (
   address: string,
+  options: ProxyConnectOptions = {},
 ): Effect.Effect<ProxyConnection, BleError, Scope.Scope> =>
   withNobleOperation(
     Effect.gen(function* () {
       const noble = yield* getNoble;
-      yield* Effect.logDebug(`[ble] waitPoweredOn`);
-      yield* waitPoweredOn(noble);
-      yield* Effect.logDebug(`[ble] scanning for ${address}`);
-
-      const peripheral = yield* findPeripheral(noble, address);
-      yield* Effect.logDebug(`[ble] found peripheral; connecting ${address}`);
 
       // Connect with disconnect-on-Scope-close. We acquire the connection
       // here so any subsequent failure (discovery, subscribe) still
       // disconnects on cleanup.
-      yield* Effect.acquireRelease(connectPeripheral(peripheral, address), () =>
-        disconnectPeripheral(peripheral).pipe(Effect.catchAll(() => Effect.void)),
+      const opened = yield* Effect.acquireRelease(
+        openProxyPeripheral(noble, address, options),
+        ({ peripheral }) =>
+          disconnectPeripheral(peripheral).pipe(Effect.catchAll(() => Effect.void)),
       );
+      const { peripheral } = opened;
       yield* Effect.logDebug(`[ble] connected; discovering`);
 
       const { dataIn, dataOut } = yield* withBleTimeout(
-        discoverProxyCharacteristics(peripheral),
+        discoverProxyCharacteristics(peripheral, opened.direct ? 0 : POST_CONNECT_SETTLE_MS),
         "discoverServicesAndCharacteristics",
       );
       yield* Effect.logDebug(`[ble] discovered; subscribing to 2ade`);
@@ -387,18 +477,13 @@ export const connectProxy = (
  */
 export const connectProxyWriter = (
   address: string,
+  options: ProxyConnectOptions = {},
 ): Effect.Effect<ProxyWriterConnection, BleError> =>
   withNobleOperation(
     Effect.gen(function* () {
       const noble = yield* getNoble;
-      yield* Effect.logDebug(`[ble] waitPoweredOn`);
-      yield* waitPoweredOn(noble);
-      yield* Effect.logDebug(`[ble] scanning for ${address}`);
-
-      const peripheral = yield* findPeripheral(noble, address);
-      yield* Effect.logDebug(`[ble] found peripheral; connecting ${address}`);
-
-      yield* connectPeripheral(peripheral, address);
+      const opened = yield* openProxyPeripheral(noble, address, options);
+      const { peripheral } = opened;
 
       let closed = false;
       const close = (): Effect.Effect<void, BleError> =>
@@ -409,9 +494,10 @@ export const connectProxyWriter = (
         });
 
       yield* Effect.logDebug(`[ble] connected; discovering Data In`);
-      const dataIn = yield* withBleTimeout(discoverProxyDataIn(peripheral), "discoverDataIn").pipe(
-        Effect.tapError(() => close()),
-      );
+      const dataIn = yield* withBleTimeout(
+        discoverProxyDataIn(peripheral, opened.direct ? 0 : POST_CONNECT_SETTLE_MS),
+        "discoverDataIn",
+      ).pipe(Effect.tapError(() => close()));
       yield* Effect.logDebug(`[ble] Data In ready`);
 
       const supportsWithoutResponse = dataIn.properties.includes("writeWithoutResponse");
