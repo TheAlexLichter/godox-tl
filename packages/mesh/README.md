@@ -21,6 +21,11 @@ Homebridge/CLI-oriented controller behavior, persistent writer reuse,
 queued/coalesced sends, state-file helpers, auto-provision integration, and
 additional command encoders used by this repo.
 
+Light-control sends retry a BLE failure once on a fresh connection, within the
+same overall `sendTimeoutMs` deadline. The retry reserves fresh sequence numbers.
+Disconnected cached writers are replaced before sending; state-file failures
+are reported directly without retrying the Bluetooth connection.
+
 Pure-function modules (crypto, PDU codecs, V2 payload) are validated against
 captured wire bytes from the Python tool's `--dry-run` mode — see
 `tests/fixtures/`. 31 byte-exact round-trips assert that the two

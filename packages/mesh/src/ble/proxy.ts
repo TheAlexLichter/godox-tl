@@ -550,6 +550,7 @@ export const connectProxyWriter = (
         address,
         write,
         close,
+        isConnected: () => !closed && peripheral.state === "connected",
       } satisfies ProxyWriterConnection;
     }),
   );

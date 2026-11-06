@@ -5,6 +5,7 @@
 import { Domain, LightController, TransportError, TransportUnsupportedError } from "@godox-tl/core";
 import { Duration, Effect, Match, Runtime } from "effect";
 import { connectProxyWriter } from "./ble/proxy.ts";
+import { BleError } from "./ble/errors.ts";
 import type { ProxyWriterConnection } from "./ble/types.ts";
 import {
   encodeFx,
@@ -154,6 +155,12 @@ export const makeMeshController = (options: MeshControllerOptions): LightControl
 
   const writerForSend = (): Effect.Effect<ProxyWriterConnection, TransportError> => {
     if (writer && persistent) {
+      if (writer.isConnected?.() === false) {
+        return Effect.logDebug(`[mesh] discarding disconnected writer for ${options.address}`).pipe(
+          Effect.zipRight(Effect.promise(closeWriter)),
+          Effect.zipRight(Effect.suspend(writerForSend)),
+        );
+      }
       return Effect.logDebug(`[mesh] reusing writer for ${options.address}`).pipe(
         Effect.as(writer),
       );
@@ -184,6 +191,14 @@ export const makeMeshController = (options: MeshControllerOptions): LightControl
     cmd: Domain.LightCommand,
   ): Effect.Effect<void, TransportError | TransportUnsupportedError> =>
     sendNow(cmd).pipe(
+      Effect.catchAll((error) => {
+        if (!(error instanceof TransportError) || !(error.cause instanceof BleError)) {
+          return Effect.fail(error);
+        }
+        return Effect.logDebug(
+          `[mesh] retrying ${cmd._tag} on a fresh writer for ${options.address}`,
+        ).pipe(Effect.zipRight(Effect.promise(closeWriter)), Effect.zipRight(sendNow(cmd)));
+      }),
       Effect.timeoutFail({
         duration: Duration.millis(sendTimeoutMs),
         onTimeout: () =>
@@ -209,7 +224,7 @@ export const makeMeshController = (options: MeshControllerOptions): LightControl
             onTimeout: () =>
               transportError(
                 options.address,
-                new Error(`write timed out after ${writeTimeoutMs}ms`),
+                new BleError({ message: `write timed out after ${writeTimeoutMs}ms` }),
               ),
           }),
         );

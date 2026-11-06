@@ -53,6 +53,8 @@ export interface ProxyWriterConnection {
   readonly address: string;
   /** Send a complete Mesh Proxy PDU to `2add`. */
   readonly write: (pdu: Uint8Array) => Effect.Effect<void, BleError>;
+  /** Whether the underlying link is still usable. Older custom writers may omit this check. */
+  readonly isConnected?: () => boolean;
   /** Disconnect the underlying GATT peripheral. A timed-out close can be retried. */
   readonly close: () => Effect.Effect<void, BleError>;
 }
