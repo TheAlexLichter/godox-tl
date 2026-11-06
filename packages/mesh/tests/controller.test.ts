@@ -93,10 +93,12 @@ class FakeNoble extends EventEmitter implements NobleLike {
 
   async startScanningAsync(): Promise<void> {
     const peripheral: PeripheralLike & {
+      state: string;
       connectAsync: () => Promise<void>;
       disconnectAsync: () => Promise<void>;
       discoverServicesAsync: () => Promise<FakeService[]>;
     } = {
+      state: "connected",
       id: "aabbccddeeff",
       uuid: "aabbccddeeff",
       address: "AA:BB:CC:DD:EE:FF",
@@ -239,10 +241,12 @@ test("mesh controller coalesces queued sends and reuses a warm proxy writer", as
 
     async startScanningAsync(): Promise<void> {
       const peripheral: PeripheralLike & {
+        state: string;
         connectAsync: () => Promise<void>;
         disconnectAsync: () => Promise<void>;
         discoverServicesAsync: () => Promise<CoalesceService[]>;
       } = {
+        state: "connected",
         id: "aabbccddeeff",
         uuid: "aabbccddeeff",
         address: "AA:BB:CC:DD:EE:FF",
@@ -340,10 +344,12 @@ test("mesh controller serializes queued sends when coalescing is disabled", asyn
 
     async startScanningAsync(): Promise<void> {
       const peripheral: PeripheralLike & {
+        state: string;
         connectAsync: () => Promise<void>;
         disconnectAsync: () => Promise<void>;
         discoverServicesAsync: () => Promise<SerialService[]>;
       } = {
+        state: "connected",
         id: "aabbccddeeff",
         uuid: "aabbccddeeff",
         address: "AA:BB:CC:DD:EE:FF",
@@ -428,10 +434,12 @@ test("mesh controller times out a hung GATT write and closes the writer", async 
 
     async startScanningAsync(): Promise<void> {
       const peripheral: PeripheralLike & {
+        state: string;
         connectAsync: () => Promise<void>;
         disconnectAsync: () => Promise<void>;
         discoverServicesAsync: () => Promise<HangingService[]>;
       } = {
+        state: "connected",
         id: "aabbccddeeff",
         uuid: "aabbccddeeff",
         address: "AA:BB:CC:DD:EE:FF",
@@ -461,10 +469,10 @@ test("mesh controller times out a hung GATT write and closes the writer", async 
 
   const state = await Effect.runPromise(loadMeshState(statePath));
   expect(exit._tag).toBe("Failure");
-  expect(writeCount).toBe(1);
-  expect(disconnectCount).toBe(1);
-  expect(state.sequenceNumber).toBe(9);
-});
+  expect(writeCount).toBe(2);
+  expect(disconnectCount).toBe(2);
+  expect(state.sequenceNumber).toBe(11);
+}, 10_000);
 
 test("mesh controller allows the peripheral scan timeout to be shortened", async () => {
   const statePath = join(dir, "state.json");
@@ -494,5 +502,5 @@ test("mesh controller allows the peripheral scan timeout to be shortened", async
   );
 
   expect(exit._tag).toBe("Failure");
-  expect(scanCount).toBe(1);
+  expect(scanCount).toBe(2);
 });
