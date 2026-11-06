@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import type { LightEntry } from "@godox-tl/core";
+import { loadMeshState, normalizeAddress } from "@godox-tl/mesh";
 import { Effect, type Layer } from "effect";
 import type {
   API,
@@ -74,7 +75,8 @@ export class GodoxTLPlatform implements DynamicPlatformPlugin {
           `(registry=${this.config.registryPath}, mode=${this.config.discoveryMode})` +
           `${entrySummary ? `: ${entrySummary}` : ""}`,
       );
-      this.materializeAccessories(entries, true);
+      const proxyFallbacks = await this.proxyFallbacksFor(entries);
+      this.materializeAccessories(entries, true, proxyFallbacks);
     } catch (err) {
       this.log.error("Failed to load registry:", err);
     }
@@ -93,14 +95,12 @@ export class GodoxTLPlatform implements DynamicPlatformPlugin {
   }
 
   private async scanCycle(): Promise<void> {
-    const known = new Set(
-      [...this.accessoriesByUUID.values()]
-        .map((c) => c.light?.entry.address)
-        .filter((a): a is string => Boolean(a)),
-    );
+    const knownEntries = [...this.accessoriesByUUID.values()]
+      .map((c) => c.light?.entry)
+      .filter((entry): entry is LightEntry => Boolean(entry));
     try {
       const newEntries = await Effect.runPromise(
-        runDiscoveryCycle(this.config, known).pipe(Effect.provide(this.loggerLayer)),
+        runDiscoveryCycle(this.config, knownEntries).pipe(Effect.provide(this.loggerLayer)),
       );
       if (newEntries.length === 0) return;
       this.log.info(
@@ -118,7 +118,49 @@ export class GodoxTLPlatform implements DynamicPlatformPlugin {
     return this.api.hap.uuid.generate(`godox-tl:${entry.address}`);
   }
 
-  private materializeAccessories(entries: ReadonlyArray<LightEntry>, reconcile = false): void {
+  private async proxyFallbacksFor(
+    entries: ReadonlyArray<LightEntry>,
+  ): Promise<ReadonlyMap<string, ReadonlyArray<string>>> {
+    const groups = new Map<string, LightEntry[]>();
+    for (const entry of entries) {
+      try {
+        const state = await Effect.runPromise(loadMeshState(entry.statePath));
+        const key = `${this.hex(state.networkKey)}:${this.hex(state.appKey)}`;
+        groups.set(key, [...(groups.get(key) ?? []), entry]);
+      } catch {
+        this.log.warn(
+          `[${entry.name}] mesh state could not be read; BLE proxy fallback disabled for this light.`,
+        );
+      }
+    }
+
+    const fallbacks = new Map<string, ReadonlyArray<string>>();
+    for (const group of groups.values()) {
+      if (group.length < 2) continue;
+      for (const entry of group) {
+        fallbacks.set(
+          normalizeAddress(entry.address),
+          group.filter((peer) => peer.address !== entry.address).map((peer) => peer.address),
+        );
+      }
+    }
+    if (groups.size > 1) {
+      this.log.warn(
+        `Known lights span ${groups.size} separate mesh network(s); BLE proxy fallback only works within each network. Factory-reset and re-provision lights to put them on one shared mesh.`,
+      );
+    }
+    return fallbacks;
+  }
+
+  private hex(bytes: Uint8Array): string {
+    return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  }
+
+  private materializeAccessories(
+    entries: ReadonlyArray<LightEntry>,
+    reconcile = false,
+    proxyFallbacks: ReadonlyMap<string, ReadonlyArray<string>> = new Map(),
+  ): void {
     const newOnes: PlatformAccessory[] = [];
     const seenUUIDs = new Set<string>();
     for (const entry of entries) {
@@ -131,6 +173,12 @@ export class GodoxTLPlatform implements DynamicPlatformPlugin {
             enableColor: this.config.enableColor,
             fxPresets: this.config.fxPresets,
             rgbwPresets: this.config.rgbwPresets,
+            mesh: {
+              findPeripheralTimeoutMs: this.config.bleFindTimeoutMs,
+              proxyAddresses: proxyFallbacks.get(normalizeAddress(entry.address)) ?? [],
+              sendTimeoutMs: this.config.bleSendTimeoutMs,
+              writeTimeoutMs: this.config.bleWriteTimeoutMs,
+            },
           });
         }
         continue;
@@ -140,6 +188,12 @@ export class GodoxTLPlatform implements DynamicPlatformPlugin {
         enableColor: this.config.enableColor,
         fxPresets: this.config.fxPresets,
         rgbwPresets: this.config.rgbwPresets,
+        mesh: {
+          findPeripheralTimeoutMs: this.config.bleFindTimeoutMs,
+          proxyAddresses: proxyFallbacks.get(normalizeAddress(entry.address)) ?? [],
+          sendTimeoutMs: this.config.bleSendTimeoutMs,
+          writeTimeoutMs: this.config.bleWriteTimeoutMs,
+        },
       });
       this.accessoriesByUUID.set(uuid, { accessory, light: wrapper });
       newOnes.push(accessory);

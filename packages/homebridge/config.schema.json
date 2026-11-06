@@ -58,6 +58,30 @@
         "default": 60,
         "minimum": 10
       },
+      "bleFindTimeoutMs": {
+        "title": "BLE find timeout (ms)",
+        "description": "How long one HomeKit control command scans for the target light before reporting it missing.",
+        "type": "integer",
+        "default": 20000,
+        "minimum": 1000,
+        "maximum": 120000
+      },
+      "bleWriteTimeoutMs": {
+        "title": "BLE write timeout (ms)",
+        "description": "How long to wait for one GATT write after the light has connected.",
+        "type": "integer",
+        "default": 5000,
+        "minimum": 100,
+        "maximum": 60000
+      },
+      "bleSendTimeoutMs": {
+        "title": "BLE send timeout (ms)",
+        "description": "Hard timeout for a full HomeKit control command, including scan, connect, service discovery, and write. The default is long enough for a light found near the end of the scan window.",
+        "type": "integer",
+        "default": 70000,
+        "minimum": 5000,
+        "maximum": 180000
+      },
       "discoveryFilters": {
         "title": "Discovery name filters (regex)",
         "type": "array",

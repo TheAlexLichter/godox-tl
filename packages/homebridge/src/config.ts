@@ -30,6 +30,9 @@ export interface PluginConfig {
   readonly startupPruneMissing?: boolean;
   readonly autoProvisionOnStartup?: boolean;
   readonly scanIntervalSeconds?: number;
+  readonly bleFindTimeoutMs?: number;
+  readonly bleWriteTimeoutMs?: number;
+  readonly bleSendTimeoutMs?: number;
   readonly discoveryFilters?: ReadonlyArray<string>;
   readonly nameTemplate?: string;
   readonly enableColor?: boolean;
@@ -63,6 +66,9 @@ export interface ResolvedConfig {
   readonly startupPruneMissing: boolean;
   readonly autoProvisionOnStartup: boolean;
   readonly scanIntervalSeconds: number;
+  readonly bleFindTimeoutMs: number;
+  readonly bleWriteTimeoutMs: number;
+  readonly bleSendTimeoutMs: number;
   readonly discoveryFilters: ReadonlyArray<RegExp>;
   readonly nameTemplate: string;
   readonly enableColor: boolean;
@@ -76,6 +82,8 @@ export interface ResolveConfigOptions {
 }
 
 const DEFAULT_FILTERS = ["^GD_LED$"];
+const DEFAULT_BLE_FIND_TIMEOUT_MS = 20_000;
+const DEFAULT_BLE_WRITE_TIMEOUT_MS = 5_000;
 
 const clampInt = (
   value: number | undefined,
@@ -137,6 +145,19 @@ export const resolveConfig = (
       provisionedAt: l.provisionedAt ?? new Date(0).toISOString(),
     }));
 
+  const bleFindTimeoutMs = clampInt(
+    raw.bleFindTimeoutMs,
+    1_000,
+    120_000,
+    DEFAULT_BLE_FIND_TIMEOUT_MS,
+  );
+  const bleWriteTimeoutMs = clampInt(
+    raw.bleWriteTimeoutMs,
+    100,
+    60_000,
+    DEFAULT_BLE_WRITE_TIMEOUT_MS,
+  );
+
   return {
     registryPath: raw.registryPath || options.defaultRegistryPath || defaultCoreRegistryPath(),
     discoveryMode: raw.discoveryMode ?? "merge",
@@ -145,6 +166,14 @@ export const resolveConfig = (
     startupPruneMissing: raw.startupPruneMissing ?? false,
     autoProvisionOnStartup: raw.autoProvisionOnStartup ?? false,
     scanIntervalSeconds: Math.max(10, raw.scanIntervalSeconds ?? 60),
+    bleFindTimeoutMs,
+    bleWriteTimeoutMs,
+    bleSendTimeoutMs: clampInt(
+      raw.bleSendTimeoutMs,
+      5_000,
+      180_000,
+      bleFindTimeoutMs + bleWriteTimeoutMs + 45_000,
+    ),
     discoveryFilters: filters,
     nameTemplate: raw.nameTemplate ?? "godox-{shortAddr}",
     enableColor: raw.enableColor ?? true,

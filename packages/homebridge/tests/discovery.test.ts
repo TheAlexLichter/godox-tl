@@ -72,6 +72,9 @@ const config = (registryPath: string): ResolvedConfig => ({
   startupPruneMissing: false,
   autoProvisionOnStartup: true,
   scanIntervalSeconds: 0.01,
+  bleFindTimeoutMs: 20_000,
+  bleWriteTimeoutMs: 5_000,
+  bleSendTimeoutMs: 70_000,
   discoveryFilters: [/^GD_LED$/],
   nameTemplate: "godox-{shortAddr}",
   enableColor: true,
@@ -111,7 +114,7 @@ test("runDiscoveryCycle treats unexpected auto-provision failures as transient s
   const noble = new FailingProvisionNoble();
   __setNobleForTesting(noble);
   const exit = await Effect.runPromiseExit(
-    runDiscoveryCycle(config(join(dir, "registry.json")), new Set()),
+    runDiscoveryCycle(config(join(dir, "registry.json")), []),
   );
   expect(Exit.isSuccess(exit)).toBe(true);
   if (Exit.isSuccess(exit)) {
@@ -124,7 +127,9 @@ test("runDiscoveryCycle reprovisions an unprovisioned device even when its addre
   const noble = new FailingProvisionNoble();
   __setNobleForTesting(noble);
   const exit = await Effect.runPromiseExit(
-    runDiscoveryCycle(config(join(dir, "registry.json")), new Set(["AA:BB:CC:DD:EE:FF"])),
+    runDiscoveryCycle(config(join(dir, "registry.json")), [
+      lightEntry("known", "AA:BB:CC:DD:EE:FF"),
+    ]),
   );
   expect(Exit.isSuccess(exit)).toBe(true);
   if (Exit.isSuccess(exit)) {
@@ -136,7 +141,7 @@ test("runDiscoveryCycle reprovisions an unprovisioned device even when its addre
 test("runDiscoveryCycle treats scan failures as an empty discovery result", async () => {
   __setNobleForTesting(new FailingScanNoble());
   const exit = await Effect.runPromiseExit(
-    runDiscoveryCycle(config(join(dir, "registry.json")), new Set()),
+    runDiscoveryCycle(config(join(dir, "registry.json")), []),
   );
   expect(Exit.isSuccess(exit)).toBe(true);
   if (Exit.isSuccess(exit)) {

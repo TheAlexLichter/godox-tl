@@ -14,6 +14,7 @@ export {
 } from "./scan.ts";
 export { connectProvisioning } from "./provisioning.ts";
 export { connectProxy, connectProxyWriter } from "./proxy.ts";
+export type { ProxyConnectOptions } from "./proxy.ts";
 export { __setNobleForTesting, shutdownNoble } from "./noble.ts";
 export type { NobleLike, PeripheralAdvertisementLike, PeripheralLike } from "./noble.ts";
 export type {
