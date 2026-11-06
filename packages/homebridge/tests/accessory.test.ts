@@ -14,13 +14,14 @@ import {
 import type { LightEntry } from "@godox-tl/core";
 import type { HAP, Logger, PlatformAccessory } from "homebridge";
 
-const { send } = vi.hoisted(() => ({ send: vi.fn() }));
+const { send, close } = vi.hoisted(() => ({ send: vi.fn(), close: vi.fn() }));
 
-vi.mock("@godox-tl/mesh", () => ({ makeMeshController: () => ({ send }) }));
+vi.mock("@godox-tl/mesh", () => ({ makeMeshController: () => ({ send, close }) }));
 
 beforeEach(() => {
   vi.useFakeTimers();
   send.mockReset().mockReturnValue(Effect.void);
+  close.mockReset().mockReturnValue(Effect.void);
 });
 
 afterEach(() => {
@@ -395,4 +396,27 @@ test("preset failures affect both light and preset reads until a successful pres
   expect(rgbw.get()).toBe(false);
   expect(service.getCharacteristic("On").get()).toBe(true);
   expect(service.getCharacteristic("Brightness").get()).toBe(25);
+});
+
+test("disposing cancels debounced HomeKit changes and closes the controller once", async () => {
+  const { light, service } = makeCommunicationHarness();
+  service.getCharacteristic("Brightness").set(45);
+  await Promise.all([light.dispose(), light.dispose()]);
+  await vi.advanceTimersByTimeAsync(500);
+  expect(send).not.toHaveBeenCalled();
+  expect(close).toHaveBeenCalledTimes(1);
+  expect(() => service.getCharacteristic("Brightness").set(60)).toThrow(FakeHapStatusError);
+});
+
+test("disposing prevents preset commands and delayed reset callbacks", async () => {
+  const { accessory, light } = makeCommunicationHarness({
+    enableColor: true,
+    fxPresets: [{ name: "test", brightness: 30, effect: 1, subtype: 0, filter: 0 }],
+    rgbwPresets: [],
+  });
+  await light.dispose();
+  const preset = accessory.getServiceById("Switch", "fx-0")!;
+  preset.getCharacteristic("On").set(true);
+  await vi.advanceTimersByTimeAsync(500);
+  expect(send).not.toHaveBeenCalled();
 });

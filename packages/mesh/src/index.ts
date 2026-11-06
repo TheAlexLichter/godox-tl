@@ -18,13 +18,13 @@ import {
   type TransportUnsupportedError,
 } from "@godox-tl/core";
 import { Layer } from "effect";
-import { makeMeshController, type MeshControllerOptions } from "./controller.ts";
+import { makeMeshControllerScoped, type MeshControllerOptions } from "./controller.ts";
 
 /** Effect Layer that provides a `LightController` backed by the native mesh stack. */
 export const makeNodeMeshLayer = (
   options: MeshControllerOptions,
 ): Layer.Layer<LightController, TransportError | TransportUnsupportedError> =>
-  Layer.succeed(LightController, makeMeshController(options));
+  Layer.effect(LightController, makeMeshControllerScoped(options));
 
 // Milestone 3: BLE transport.
 export {
@@ -84,8 +84,8 @@ export type {
 } from "./config/index.ts";
 
 // Send-side controller + state-file I/O (milestone 7).
-export { makeMeshController } from "./controller.ts";
-export type { MeshControllerOptions } from "./controller.ts";
+export { makeMeshController, makeMeshControllerScoped } from "./controller.ts";
+export type { MeshController, MeshControllerOptions } from "./controller.ts";
 export { loadMeshState, MeshStateError, saveMeshState } from "./state.ts";
 export type { MeshState } from "./state.ts";
 export { provisionAndRebind } from "./integration.ts";

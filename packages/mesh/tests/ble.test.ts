@@ -969,3 +969,112 @@ test.skipIf(!hardwareAvailable)(
     expect(Array.isArray(devices)).toBe(true);
   },
 );
+
+test("connectProxyWriter: interruption during Data In discovery closes its owned link", async () => {
+  let started!: () => void;
+  let finishDiscovery!: (services: never[]) => void;
+  const discovering = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  const services = new Promise<never[]>((resolve) => {
+    finishDiscovery = resolve;
+  });
+  const peripheral = {
+    address: "A4:C1:38:21:09:80",
+    state: "disconnected",
+    disconnectAsync: vi.fn(async () => {
+      peripheral.state = "disconnected";
+    }),
+    discoverServicesAsync: async () => {
+      started();
+      return services;
+    },
+  };
+  class DiscoveryNoble extends EventEmitter implements NobleLike {
+    state = "poweredOn";
+    async connectAsync() {
+      peripheral.state = "connected";
+      return peripheral;
+    }
+    async startScanningAsync(): Promise<void> {}
+    async stopScanningAsync(): Promise<void> {}
+  }
+  __setNobleForTesting(new DiscoveryNoble());
+  const abort = new AbortController();
+  const opening = Effect.runPromiseExit(
+    connectProxyWriter(peripheral.address, { directAddressType: "public" }),
+    { signal: abort.signal },
+  );
+  await discovering;
+  abort.abort();
+  expect((await opening)._tag).toBe("Failure");
+  expect(peripheral.disconnectAsync).toHaveBeenCalledTimes(1);
+  finishDiscovery([]);
+  await Promise.resolve();
+  expect(peripheral.state).toBe("disconnected");
+});
+
+test.each(["direct", "scanned"] as const)(
+  "connectProxyWriter: interrupted %s connect closes a late native link",
+  async (route) => {
+    let started!: () => void;
+    let release!: () => void;
+    let disconnected!: () => void;
+    const connecting = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const native = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const cleaned = new Promise<void>((resolve) => {
+      disconnected = resolve;
+    });
+    const peripheral = {
+      id: "83e72030ef94629921dd372408de38c2",
+      address: "A4:C1:38:21:09:80",
+      state: "disconnected",
+      cancelConnect: vi.fn(),
+      connectAsync: async () => {
+        peripheral.state = "connecting";
+        started();
+        await native;
+        peripheral.state = "connected";
+      },
+      disconnectAsync: vi.fn(async () => {
+        peripheral.state = "disconnected";
+        disconnected();
+      }),
+    };
+    class InterruptedNoble extends EventEmitter implements NobleLike {
+      state = "poweredOn";
+      cancelConnect = vi.fn();
+      async connectAsync() {
+        await peripheral.connectAsync();
+        return peripheral;
+      }
+      async startScanningAsync(): Promise<void> {
+        queueMicrotask(() => this.emit("discover", peripheral));
+      }
+      async stopScanningAsync(): Promise<void> {}
+    }
+    const noble = new InterruptedNoble();
+    __setNobleForTesting(noble);
+    const abort = new AbortController();
+    const opening = Effect.runPromiseExit(
+      route === "direct"
+        ? connectProxyWriter(peripheral.address, { directAddressType: "public" })
+        : connectProxyWriter("83E72030-EF94-6299-21DD-372408DE38C2"),
+      { signal: abort.signal },
+    );
+    await connecting;
+    abort.abort();
+    expect((await opening)._tag).toBe("Failure");
+    expect(
+      route === "direct" ? noble.cancelConnect : peripheral.cancelConnect,
+    ).toHaveBeenCalledTimes(1);
+    release();
+    await cleaned;
+    expect(peripheral.state).toBe("disconnected");
+    expect(peripheral.disconnectAsync).toHaveBeenCalledTimes(1);
+  },
+);

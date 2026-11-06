@@ -125,7 +125,17 @@ await Effect.runPromise(
     }),
   ),
 );
+await Effect.runPromise(light.close());
 ```
+
+Call `light.close()` when a direct controller is no longer needed. It rejects
+queued and future sends, interrupts active work, and waits for the existing
+bounded disconnect cleanup without sending lighting commands.
+
+`makeMeshControllerScoped(options)` registers this cleanup in the caller's
+Effect scope. `makeNodeMeshLayer` also closes its controller when the layer's
+scope ends. Homebridge disposes controllers and cancels pending debounces and
+discovery during shutdown.
 
 ### Effect-style use
 
@@ -200,3 +210,13 @@ gated by `MESH_HARDWARE_AVAILABLE=1` and skipped by default.
 MIT. Includes protocol work derived from
 [`mattharrison/godox-ul60bi-bt`](https://github.com/mattharrison/godox-ul60bi-bt),
 also MIT.
+
+### Cancelling queued commands
+
+Controller sends use a scoped Effect mailbox. Cancelling a queued caller removes
+its request before it reserves sequences or writes BLE data. Coalescing selects
+the newest remaining caller and preserves that caller's logging context.
+Cancelling the last waiter for an active command interrupts it and waits for its
+cleanup before another command runs; this cannot undo writes already accepted
+by the native Bluetooth stack. Closing the controller settles queued callers and
+joins the active cleanup. Idle workers exit rather than keeping CLI processes alive.

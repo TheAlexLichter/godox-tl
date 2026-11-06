@@ -150,7 +150,7 @@ test("coalesced work uses the newest command's runtime, while settling supersede
   await Promise.all([first, superseded, newest]);
 
   expect(firstMessages.filter((message) => message.includes("[mesh] sent Cct"))).toHaveLength(1);
-  expect(supersededMessages).toEqual([]);
+  expect(supersededMessages).toEqual(["[mesh] command queued"]);
   expect(newestMessages.filter((message) => message.includes("[mesh] sent Cct"))).toHaveLength(1);
 }, 10_000);
 

@@ -1,5 +1,5 @@
-import { Domain, type LightController, type LightEntry } from "@godox-tl/core";
-import { makeMeshController } from "@godox-tl/mesh";
+import { Domain, type LightEntry } from "@godox-tl/core";
+import { makeMeshController, type MeshController } from "@godox-tl/mesh";
 import { Effect, type Layer } from "effect";
 import type { HAP, Logger, PlatformAccessory, Service } from "homebridge";
 import type { FxPreset, RgbwPreset } from "./config.ts";
@@ -85,7 +85,7 @@ export interface HomeKitFeatureConfig {
 /** Wraps one Service.Lightbulb for one registered light. */
 export class GodoxLightAccessory {
   private readonly service: Service;
-  private readonly controller: LightController["Service"];
+  private readonly controller: MeshController;
   private readonly loggerLayer: Layer.Layer<never>;
   private readonly debouncer: Debouncer<CommandState>;
   private state: CommandState = {
@@ -110,6 +110,8 @@ export class GodoxLightAccessory {
   private lastActiveState: CommandState = cloneState({ ...this.state, on: true });
   private restoredMode: CommandState["mode"] | undefined;
   private suppressColorTemperatureModeSwitchUntil = 0;
+  private disposed = false;
+  private disposal: Promise<void> | undefined;
   private communicationFailed = false;
   private nextCommandId = 0;
   private lastCompletedCommandId = 0;
@@ -271,6 +273,7 @@ export class GodoxLightAccessory {
   /** HomeKit sends a single characteristic at a time, but we coalesce all
    * in-flight changes into one BLE write to avoid flooding the mesh. */
   private queue(): void {
+    if (this.disposed) throw new this.hap.HapStatusError(COMMUNICATION_FAILURE);
     if (this.state.on) {
       this.lastActiveState = cloneState(this.state);
     }
@@ -362,6 +365,7 @@ export class GodoxLightAccessory {
   }
 
   private runCommand(cmd: Domain.LightCommand, after?: () => void): void {
+    if (this.disposed) return;
     const commandId = ++this.nextCommandId;
     Effect.runPromise(
       (this.controller.send(cmd) as Effect.Effect<void, unknown>).pipe(
@@ -369,6 +373,7 @@ export class GodoxLightAccessory {
         Effect.tap(() => Effect.sync(() => this.completeCommand(commandId, false))),
         Effect.catch((err) =>
           Effect.sync(() => {
+            if (this.disposed) return;
             this.completeCommand(commandId, true);
             this.log.warn(`[${this.entry.name}] send failed: ${this.formatSendError(err)}`);
           }),
@@ -376,22 +381,25 @@ export class GodoxLightAccessory {
       ),
     )
       .catch((err: unknown) => {
+        if (this.disposed) return;
         this.completeCommand(commandId, true);
         this.log.error(
           `[${this.entry.name}] send failed unexpectedly: ${this.formatSendError(err)}`,
         );
       })
-      .finally(after);
+      .finally(() => {
+        if (!this.disposed) after?.();
+      });
   }
 
   private completeCommand(commandId: number, failed: boolean): void {
-    if (commandId < this.lastCompletedCommandId) return;
+    if (this.disposed || commandId < this.lastCompletedCommandId) return;
     this.lastCompletedCommandId = commandId;
     this.communicationFailed = failed;
   }
 
   private readValue<T>(value: T): T {
-    if (this.communicationFailed) {
+    if (this.disposed || this.communicationFailed) {
       throw new this.hap.HapStatusError(COMMUNICATION_FAILURE);
     }
     return value;
@@ -424,6 +432,18 @@ export class GodoxLightAccessory {
         });
       })
       .onGet(() => this.readValue(false));
+  }
+
+  /** Discard pending HomeKit changes and await the controller's BLE cleanup. */
+  dispose(): Promise<void> {
+    if (!this.disposal) {
+      this.disposed = true;
+      this.debouncer.cancel();
+      this.disposal = Effect.runPromise(
+        this.controller.close().pipe(Effect.provide(this.loggerLayer)),
+      );
+    }
+    return this.disposal;
   }
 
   /** For test/inspection: desired settings, not confirmed physical output. */

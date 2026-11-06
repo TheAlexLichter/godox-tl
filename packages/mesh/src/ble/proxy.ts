@@ -7,7 +7,7 @@
 // top of the controller wraps the entire lifetime.
 
 import type { Characteristic, Peripheral } from "@stoprocent/noble";
-import { Queue, Duration, Effect, type Scope, Stream } from "effect";
+import { Queue, Duration, Effect, Exit, type Scope, Stream } from "effect";
 import { matchAddress, normalizeAddress } from "./address.ts";
 import { BleError } from "./errors.ts";
 import { getNoble, type NobleLike, type PeripheralLike, withNobleOperation } from "./noble.ts";
@@ -17,6 +17,21 @@ import type { ProxyConnection, ProxyWriterConnection } from "./types.ts";
 
 const MESH_PROXY_DATA_IN_UUID = "2add"; // proxy client → server (writes)
 const MESH_PROXY_DATA_OUT_UUID = "2ade"; // server → proxy client (notifications)
+
+/** Internal profile description shared by the proxy and provisioning bearers. */
+export interface MeshGattProfile {
+  readonly name: string;
+  readonly serviceUuid: string;
+  readonly dataInUuid: string;
+  readonly dataOutUuid: string;
+  readonly scanOnly?: boolean;
+}
+const proxyProfile: MeshGattProfile = {
+  name: "Mesh Proxy",
+  serviceUuid: MESH_PROXY_SERVICE_UUID,
+  dataInUuid: MESH_PROXY_DATA_IN_UUID,
+  dataOutUuid: MESH_PROXY_DATA_OUT_UUID,
+};
 const DEFAULT_FIND_PERIPHERAL_TIMEOUT_MS = 20_000;
 const POWERED_ON_TIMEOUT_MS = 5_000;
 const DIRECT_CONNECT_TIMEOUT_MS = 4_000;
@@ -159,9 +174,10 @@ const DISCOVER_TIMEOUT_MS = 15_000;
 // connections worked with immediate discovery on both Godox lights. Targeted
 // `discoverServicesAsync([UUID])` uses Find By Type Value; broad discoverAll
 // hangs on these chips.
-const discoverProxyCharacteristics = (
+const discoverProfileCharacteristics = (
   peripheral: Peripheral,
   settleMs: number,
+  profile: MeshGattProfile,
 ): Effect.Effect<
   {
     readonly dataIn: Characteristic;
@@ -171,48 +187,45 @@ const discoverProxyCharacteristics = (
 > =>
   Effect.gen(function* () {
     if (settleMs > 0) yield* Effect.sleep(`${settleMs} millis`);
-    const services = yield* Effect.tryPromise({
-      try: () => peripheral.discoverServicesAsync([MESH_PROXY_SERVICE_UUID]),
-      catch: (cause) =>
-        new BleError({
-          cause,
-          message: `discoverServicesAsync(['${MESH_PROXY_SERVICE_UUID}']) failed`,
-        }),
-    }).pipe(
+    const services = yield* nativeGattStep(
+      peripheral,
+      () => peripheral.discoverServicesAsync([profile.serviceUuid]),
+      `discoverServicesAsync(['${profile.serviceUuid}'])`,
+    ).pipe(
       Effect.timeoutOrElse({
         duration: Duration.millis(DISCOVER_TIMEOUT_MS),
         orElse: () =>
           Effect.fail(
             new BleError({
-              message: `Mesh Proxy service discovery hung past ${DISCOVER_TIMEOUT_MS / 1_000}s`,
+              message: `${profile.name} service discovery hung past ${DISCOVER_TIMEOUT_MS / 1_000}s`,
             }),
           ),
       }),
     );
-    const service = services.find((s) => s.uuid.toLowerCase() === MESH_PROXY_SERVICE_UUID);
+    const service = services.find((s) => s.uuid.toLowerCase() === profile.serviceUuid);
     if (!service) {
       return yield* Effect.fail(
         new BleError({
-          message: `Mesh Proxy service ${MESH_PROXY_SERVICE_UUID} not exposed by the peripheral (saw: [${services.map((s) => s.uuid).join(",") || "(none)"}]).`,
+          message: `${profile.name} service ${profile.serviceUuid} not exposed by the peripheral (saw: [${services.map((s) => s.uuid).join(",") || "(none)"}]).`,
         }),
       );
     }
-    const characteristics = yield* Effect.tryPromise({
-      try: () =>
-        service.discoverCharacteristicsAsync([MESH_PROXY_DATA_IN_UUID, MESH_PROXY_DATA_OUT_UUID]),
-      catch: (cause) => new BleError({ cause, message: "discoverCharacteristicsAsync failed" }),
-    }).pipe(
+    const characteristics = yield* nativeGattStep(
+      peripheral,
+      () => service.discoverCharacteristicsAsync([profile.dataInUuid, profile.dataOutUuid]),
+      "discoverCharacteristicsAsync",
+    ).pipe(
       Effect.timeoutOrElse({
         duration: Duration.millis(DISCOVER_TIMEOUT_MS),
         orElse: () => Effect.fail(new BleError({ message: "Characteristic discovery hung" })),
       }),
     );
-    const dataIn = characteristics.find((c) => c.uuid.toLowerCase() === MESH_PROXY_DATA_IN_UUID);
-    const dataOut = characteristics.find((c) => c.uuid.toLowerCase() === MESH_PROXY_DATA_OUT_UUID);
+    const dataIn = characteristics.find((c) => c.uuid.toLowerCase() === profile.dataInUuid);
+    const dataOut = characteristics.find((c) => c.uuid.toLowerCase() === profile.dataOutUuid);
     if (!dataIn || !dataOut) {
       return yield* Effect.fail(
         new BleError({
-          message: `Mesh Proxy characteristics not found (in=${dataIn ? "ok" : "missing"}, out=${dataOut ? "ok" : "missing"}).`,
+          message: `${profile.name} characteristics not found (in=${dataIn ? "ok" : "missing"}, out=${dataOut ? "ok" : "missing"}).`,
         }),
       );
     }
@@ -225,14 +238,11 @@ const discoverProxyDataIn = (
 ): Effect.Effect<Characteristic, BleError> =>
   Effect.gen(function* () {
     if (settleMs > 0) yield* Effect.sleep(`${settleMs} millis`);
-    const services = yield* Effect.tryPromise({
-      try: () => peripheral.discoverServicesAsync([MESH_PROXY_SERVICE_UUID]),
-      catch: (cause) =>
-        new BleError({
-          cause,
-          message: `discoverServicesAsync(['${MESH_PROXY_SERVICE_UUID}']) failed`,
-        }),
-    }).pipe(
+    const services = yield* nativeGattStep(
+      peripheral,
+      () => peripheral.discoverServicesAsync([MESH_PROXY_SERVICE_UUID]),
+      `discoverServicesAsync(['${MESH_PROXY_SERVICE_UUID}'])`,
+    ).pipe(
       Effect.timeoutOrElse({
         duration: Duration.millis(DISCOVER_TIMEOUT_MS),
         orElse: () =>
@@ -251,10 +261,11 @@ const discoverProxyDataIn = (
         }),
       );
     }
-    const characteristics = yield* Effect.tryPromise({
-      try: () => service.discoverCharacteristicsAsync([MESH_PROXY_DATA_IN_UUID]),
-      catch: (cause) => new BleError({ cause, message: "discoverCharacteristicsAsync failed" }),
-    }).pipe(
+    const characteristics = yield* nativeGattStep(
+      peripheral,
+      () => service.discoverCharacteristicsAsync([MESH_PROXY_DATA_IN_UUID]),
+      "discoverCharacteristicsAsync",
+    ).pipe(
       Effect.timeoutOrElse({
         duration: Duration.millis(DISCOVER_TIMEOUT_MS),
         orElse: () => Effect.fail(new BleError({ message: "Characteristic discovery hung" })),
@@ -353,6 +364,42 @@ const trackAddressCleanup = (
     void pending.then(clear, clear);
   }
 };
+
+/** Interruption stops the Effect, while the native GATT task can still finish.
+ * Keep its peripheral unavailable until that task settles, so old callbacks
+ * cannot mutate the GATT state of a replacement connection.
+ */
+const nativeGattStep = <A>(
+  peripheral: Peripheral,
+  start: () => Promise<A>,
+  label: string,
+): Effect.Effect<A, BleError> =>
+  Effect.suspend(() => {
+    let pending: Promise<A> | undefined;
+    return Effect.tryPromise({
+      try: () => {
+        pending = Promise.resolve().then(start);
+        return pending;
+      },
+      catch: (cause) => new BleError({ cause, message: `${label} failed` }),
+    }).pipe(
+      Effect.onExit((exit) =>
+        Effect.sync(() => {
+          if (!Exit.isFailure(exit) || !pending) return;
+          const owner = peripheralOwners.get(peripheral);
+          if (owner)
+            trackAddressCleanup(
+              owner.noble,
+              [...owner.addresses],
+              pending.then(
+                () => {},
+                () => {},
+              ),
+            );
+        }),
+      ),
+    );
+  });
 
 const pendingAddressCleanup = (
   noble: NobleLike,
@@ -478,6 +525,7 @@ const connectPeripheral = (
   peripheral: Peripheral,
   address: string,
   generation: object,
+  onReady?: () => void,
 ): Effect.Effect<void, BleError> =>
   Effect.suspend(() => {
     let pending: Promise<void> | undefined;
@@ -523,7 +571,11 @@ const connectPeripheral = (
         withBleTimeout(
           Effect.tryPromise({
             try: () => {
-              pending = Promise.resolve().then(() => peripheral.connectAsync());
+              pending = Promise.resolve()
+                .then(() => peripheral.connectAsync())
+                .then(() => {
+                  if (!abandonedCleanup) onReady?.();
+                });
               return pending;
             },
             catch: (cause) =>
@@ -552,18 +604,19 @@ const connectPeripheral = (
     );
   });
 
+interface OpenedPeripheral {
+  readonly peripheral: Peripheral;
+  readonly direct: boolean;
+  readonly generation: object;
+}
+
 const openProxyPeripheral = (
   noble: NobleLike,
   address: string,
   options: ProxyConnectOptions,
-): Effect.Effect<
-  {
-    readonly peripheral: Peripheral;
-    readonly direct: boolean;
-    readonly generation: object;
-  },
-  BleError
-> =>
+  allowDirect = true,
+  onReady?: (opened: OpenedPeripheral) => void,
+): Effect.Effect<OpenedPeripheral, BleError> =>
   Effect.gen(function* () {
     const addresses = candidateAddresses(address, options.fallbackAddresses);
     const findPeripheralTimeoutMs = Math.max(
@@ -573,7 +626,9 @@ const openProxyPeripheral = (
     yield* Effect.logDebug(`[ble] waitPoweredOn`);
     yield* waitPoweredOn(noble);
 
-    const addressType = options.directAddressType ?? inferredDirectAddressType(address);
+    const addressType = allowDirect
+      ? (options.directAddressType ?? inferredDirectAddressType(address))
+      : undefined;
     const directConnect = noble.connectAsync?.bind(noble);
     if (addressType && directConnect) {
       yield* awaitPendingDisconnect(() => pendingAddressCleanup(noble, [address]));
@@ -609,6 +664,8 @@ const openProxyPeripheral = (
               peripheral as Peripheral,
             );
           }
+          if (peripheral && !abandonedCleanup)
+            onReady?.({ peripheral: peripheral as Peripheral, direct: true, generation });
           return peripheral as Peripheral;
         });
       void pending.catch(() => undefined);
@@ -647,38 +704,55 @@ const openProxyPeripheral = (
     rememberPeripheral(noble, peripheral);
     yield* Effect.logDebug(`[ble] found peripheral; connecting ${address}`);
     const generation = {};
-    yield* connectPeripheral(noble, peripheral, address, generation);
+    yield* connectPeripheral(noble, peripheral, address, generation, () =>
+      onReady?.({ peripheral, direct: false, generation }),
+    );
     return { peripheral, direct: false, generation };
   });
 
-export const connectProxy = (
+export const connectMeshProfile = (
   address: string,
+  profile: MeshGattProfile,
   options: ProxyConnectOptions = {},
 ): Effect.Effect<ProxyConnection, BleError, Scope.Scope> =>
   withNobleOperation(
     Effect.gen(function* () {
       const noble = yield* getNoble;
 
-      // Connect with disconnect-on-Scope-close. We acquire the connection
-      // here so any subsequent failure (discovery, subscribe) still
-      // disconnects on cleanup.
-      const opened = yield* Effect.acquireRelease(
-        openProxyPeripheral(noble, address, options),
-        ({ peripheral, generation }) =>
-          Effect.suspend(() =>
-            ownsConnection(peripheral, generation)
-              ? disconnectPeripheral(peripheral, generation).pipe(Effect.catch(() => Effect.void))
-              : Effect.void,
-          ),
+      // Register before opening and publish the native result before the Effect
+      // scheduler can interrupt its handoff. Late abandoned native results also
+      // retain their existing pending-task fence and cleanup.
+      let owned: OpenedPeripheral | undefined;
+      yield* Effect.addFinalizer(() =>
+        Effect.suspend(() =>
+          owned
+            ? disconnectPeripheral(owned.peripheral, owned.generation).pipe(
+                Effect.catch(() => Effect.void),
+              )
+            : Effect.void,
+        ),
       );
+      const opened = yield* openProxyPeripheral(
+        noble,
+        address,
+        options,
+        !profile.scanOnly,
+        (value) => {
+          owned = value;
+        },
+      ).pipe(Effect.interruptible);
       const { peripheral } = opened;
       yield* Effect.logDebug(`[ble] connected; discovering`);
 
       const { dataIn, dataOut } = yield* withBleTimeout(
-        discoverProxyCharacteristics(peripheral, opened.direct ? 0 : POST_CONNECT_SETTLE_MS),
+        discoverProfileCharacteristics(
+          peripheral,
+          opened.direct ? 0 : POST_CONNECT_SETTLE_MS,
+          profile,
+        ),
         "discoverServicesAndCharacteristics",
       );
-      yield* Effect.logDebug(`[ble] discovered; subscribing to 2ade`);
+      yield* Effect.logDebug(`[ble] discovered; subscribing to ${profile.dataOutUuid}`);
 
       // Build the notifications stream first — we want every subscriber to
       // share a single GATT subscription, so the Stream is async-iterator
@@ -699,29 +773,57 @@ export const connectProxy = (
         }
       };
 
-      yield* Effect.acquireRelease(
-        withBleTimeout(
-          Effect.tryPromise({
-            try: async () => {
-              dataOut.on("data", onData);
-              await dataOut.subscribeAsync();
-            },
-            catch: (cause) =>
-              new BleError({
-                cause,
-                message: `Failed to subscribe to notifications on Mesh Proxy Data Out (${MESH_PROXY_DATA_OUT_UUID})`,
-              }),
-          }),
-          "subscribeAsync(2ade)",
-        ),
-        () =>
-          Effect.promise(async () => {
-            dataOut.removeListener("data", onData);
-            if (!ownsConnection(peripheral, opened.generation)) return;
-            await dataOut.unsubscribeAsync().catch(() => {
-              /* swallow */
+      let subscription: Promise<void> | undefined;
+      let subscriptionCleanup: Promise<void> | undefined;
+      const stopSubscription = (): Promise<void> | undefined => {
+        dataOut.removeListener("data", onData);
+        if (!subscription) return;
+        if (!subscriptionCleanup) {
+          subscriptionCleanup = subscription
+            .catch(() => undefined)
+            .then(async () => {
+              if (!ownsConnection(peripheral, opened.generation)) return;
+              await dataOut.unsubscribeAsync().catch(() => undefined);
             });
+          const owner = peripheralOwners.get(peripheral);
+          if (owner) trackAddressCleanup(noble, [...owner.addresses], subscriptionCleanup);
+        }
+        return subscriptionCleanup;
+      };
+      // Register before starting native subscription; abort and timeout must
+      // remove this listener even when subscribeAsync never settles.
+      yield* Effect.addFinalizer(() =>
+        Effect.tryPromise({
+          try: async () => {
+            const cleanup = stopSubscription();
+            if (cleanup) await awaitDisconnect(cleanup);
+          },
+          catch: (cause) =>
+            new BleError({ cause, message: `Failed to stop ${profile.name} notifications` }),
+        }).pipe(Effect.catch((error) => Effect.logWarning(`[ble] ${error.message}`))),
+      );
+      yield* withBleTimeout(
+        Effect.tryPromise({
+          try: () => {
+            dataOut.on("data", onData);
+            subscription = Promise.resolve().then(() => dataOut.subscribeAsync());
+            return subscription;
+          },
+          catch: (cause) =>
+            new BleError({
+              cause,
+              message: `Failed to subscribe to ${profile.name} Data Out (${profile.dataOutUuid})`,
+            }),
+        }),
+        `subscribeAsync(${profile.dataOutUuid})`,
+      ).pipe(
+        Effect.onExit((exit) =>
+          Effect.sync(() => {
+            // Install the native fence before releasing the adapter operation lock;
+            // the caller's scope can run its finalizers after that lock is released.
+            if (Exit.isFailure(exit)) void stopSubscription();
           }),
+        ),
       );
       yield* Effect.logDebug(`[ble] subscribed; ready`);
       const notifications: Stream.Stream<Uint8Array, BleError> = Stream.callback<
@@ -759,7 +861,7 @@ export const connectProxy = (
           catch: (cause) =>
             new BleError({
               cause,
-              message: `Failed to write ${pdu.byteLength} bytes to Mesh Proxy Data In (${MESH_PROXY_DATA_IN_UUID})`,
+              message: `Failed to write ${pdu.byteLength} bytes to ${profile.name} Data In (${profile.dataInUuid})`,
             }),
         });
 
@@ -771,6 +873,12 @@ export const connectProxy = (
     }),
   );
 
+export const connectProxy = (
+  address: string,
+  options: ProxyConnectOptions = {},
+): Effect.Effect<ProxyConnection, BleError, Scope.Scope> =>
+  connectMeshProfile(address, proxyProfile, options);
+
 /** Open a write-only Mesh Proxy connection. This is the fast path for normal
  * control commands: it discovers only Data In (2add), skips subscription to
  * Data Out (2ade), and returns an explicit `close` handle so callers can keep
@@ -779,56 +887,60 @@ export const connectProxy = (
 export const connectProxyWriter = (
   address: string,
   options: ProxyConnectOptions = {},
+  onReady?: (connection: ProxyWriterConnection) => void,
 ): Effect.Effect<ProxyWriterConnection, BleError> =>
   withNobleOperation(
-    Effect.gen(function* () {
-      const noble = yield* getNoble;
-      const opened = yield* openProxyPeripheral(noble, address, options);
-      const { peripheral } = opened;
-
+    Effect.suspend(() => {
+      let owned: OpenedPeripheral | undefined;
       let closed = false;
       const close = (): Effect.Effect<void, BleError> =>
         Effect.gen(function* () {
-          if (closed) return;
-          if (!ownsConnection(peripheral, opened.generation)) {
+          if (closed || !owned) return;
+          if (!ownsConnection(owned.peripheral, owned.generation)) {
             closed = true;
             return;
           }
-          yield* disconnectPeripheral(peripheral, opened.generation);
+          yield* disconnectPeripheral(owned.peripheral, owned.generation);
           closed = true;
         });
-
-      yield* Effect.logDebug(`[ble] connected; discovering Data In`);
-      const dataIn = yield* withBleTimeout(
-        discoverProxyDataIn(peripheral, opened.direct ? 0 : POST_CONNECT_SETTLE_MS),
-        "discoverDataIn",
-      ).pipe(Effect.tapError(() => close()));
-      yield* Effect.logDebug(`[ble] Data In ready`);
-
-      const supportsWithoutResponse = dataIn.properties.includes("writeWithoutResponse");
-
-      const write = (pdu: Uint8Array): Effect.Effect<void, BleError> =>
-        Effect.tryPromise({
-          try: () =>
-            dataIn.writeAsync(
-              Buffer.from(pdu.buffer, pdu.byteOffset, pdu.byteLength),
-              supportsWithoutResponse,
-            ),
-          catch: (cause) =>
-            new BleError({
-              cause,
-              message: `Failed to write ${pdu.byteLength} bytes to Mesh Proxy Data In (${MESH_PROXY_DATA_IN_UUID})`,
-            }),
+      return Effect.gen(function* () {
+        const noble = yield* getNoble;
+        const opened = yield* openProxyPeripheral(noble, address, options, true, (value) => {
+          owned = value;
         });
-
-      return {
-        address,
-        write,
-        close,
-        isConnected: () =>
-          !closed &&
-          ownsConnection(peripheral, opened.generation) &&
-          peripheral.state === "connected",
-      } satisfies ProxyWriterConnection;
+        const { peripheral } = opened;
+        yield* Effect.logDebug(`[ble] connected; discovering Data In`);
+        const dataIn = yield* withBleTimeout(
+          discoverProxyDataIn(peripheral, opened.direct ? 0 : POST_CONNECT_SETTLE_MS),
+          "discoverDataIn",
+        );
+        yield* Effect.logDebug(`[ble] Data In ready`);
+        const supportsWithoutResponse = dataIn.properties.includes("writeWithoutResponse");
+        const write = (pdu: Uint8Array): Effect.Effect<void, BleError> =>
+          Effect.tryPromise({
+            try: () =>
+              dataIn.writeAsync(
+                Buffer.from(pdu.buffer, pdu.byteOffset, pdu.byteLength),
+                supportsWithoutResponse,
+              ),
+            catch: (cause) =>
+              new BleError({
+                cause,
+                message: `Failed to write ${pdu.byteLength} bytes to Mesh Proxy Data In (${MESH_PROXY_DATA_IN_UUID})`,
+              }),
+          });
+        const connection = {
+          address,
+          write,
+          close,
+          isConnected: () =>
+            !closed &&
+            ownsConnection(peripheral, opened.generation) &&
+            peripheral.state === "connected",
+        } satisfies ProxyWriterConnection;
+        // Publish ownership before returning across an interruptible boundary.
+        onReady?.(connection);
+        return connection;
+      }).pipe(Effect.onExit((exit) => (Exit.isFailure(exit) ? close() : Effect.void)));
     }),
   );
