@@ -82,6 +82,15 @@ provisioning/connect operation.
   `saveMeshState` for the on-disk JSON format (compatible with the Python
   tool's `mesh_state.json`).
 
+State reads and writes validate the legacy JSON fields with Effect Schema:
+keys contain exactly 16 bytes of hexadecimal data, IV indices are unsigned
+32-bit integers, and node/source addresses are unicast values from 1 to 32767.
+The next-unused sequence counter accepts 0 through 16777216, including the
+exhausted sentinel. Empty `device_address` strings and optional
+`sequence_directory` strings remain supported, and unknown future fields are
+accepted. Invalid files return `MeshStateError` naming affected fields while
+keeping key values out of error messages and causes.
+
 ## Examples
 
 ### Promise-style use

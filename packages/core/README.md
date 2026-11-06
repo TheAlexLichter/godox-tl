@@ -26,7 +26,10 @@ pnpm add @godox-tl/core
   Transport packages such as `@godox-tl/mesh` provide the implementation.
 - **Registry** — a per-host JSON registry at `~/.config/godox-tl/registry.json`
   mapping `name → { address, statePath, nodeAddress, provisionedAt }`. Atomic
-  writes, XDG-aware location.
+  writes, XDG-aware location. Registry reads and writes validate entries with
+  Effect Schema. A missing file means an empty registry; malformed JSON or
+  invalid entries return `RegistryError` without replacing the file. Unknown
+  fields remain compatible and are preserved when saving a loaded registry.
 - **Experimental DMX transport** — `makeDmxLayer({ driver, mode, startChannel })`
   over [`dmx-ts`](https://www.npmjs.com/package/dmx-ts) (Art-Net, sACN, Enttec,
   DMXKing). This is manual-derived/internal and not part of the tested TL30
