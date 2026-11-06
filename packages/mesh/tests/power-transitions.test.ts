@@ -42,17 +42,17 @@ interface Frame {
   readonly payload: Uint8Array;
 }
 
-const decodeFrame = (data: Buffer): Frame => {
-  const keys = k2(initialState.networkKey, Uint8Array.of(0));
+const decodeFrame = (data: Buffer, state: MeshState): Frame => {
+  const keys = k2(state.networkKey, Uint8Array.of(0));
   const network = decodeNetworkPdu({
     pdu: decodeProxyPdu(data).payload,
-    ivIndex: initialState.ivIndex,
+    ivIndex: state.ivIndex,
     ...keys,
   });
   const access = decryptAccessPdu({
     encryptedAccessPdu: decodeUnsegmentedAccess(network.lowerTransportPdu).encryptedAccessPdu,
-    appKey: initialState.appKey,
-    nonce: applicationNonce({ aszmic: 0, ...network, ivIndex: initialState.ivIndex }),
+    appKey: state.appKey,
+    nonce: applicationNonce({ aszmic: 0, ...network, ivIndex: state.ivIndex }),
     szmic: 0,
   });
   return { sequence: network.seq, payload: access.subarray(3) };
@@ -62,6 +62,7 @@ class PowerNoble extends EventEmitter implements NobleLike {
   state = "poweredOn";
   connections = 0;
   disconnects = 0;
+  meshState = initialState;
   readonly frames: Frame[] = [];
 
   constructor(private readonly onWrite?: (frame: Frame) => void) {
@@ -89,7 +90,7 @@ class PowerNoble extends EventEmitter implements NobleLike {
               uuid: "2add",
               properties: ["writeWithoutResponse"],
               writeAsync: async (data: Buffer): Promise<void> => {
-                const frame = decodeFrame(data);
+                const frame = decodeFrame(data, this.meshState);
                 this.frames.push(frame);
                 this.onWrite?.(frame);
               },
@@ -202,4 +203,64 @@ test("a failed send leaves power unknown for the next attempt", async () => {
   ]);
   expect(noble.connections).toBe(previousConnections + 1);
   expect(new Set(noble.frames.map((frame) => frame.sequence)).size).toBe(noble.frames.length);
+}, 15_000);
+
+test("an Off from another controller invalidates warm power confidence under the source lease", async () => {
+  const statePath = join(dir, "state.json");
+  await Effect.runPromise(
+    saveMeshState(statePath, { ...initialState, sequenceDirectory: join(dir, "sequences") }),
+  );
+  let powered = false;
+  let settingsWhileOff = 0;
+  const noble = new PowerNoble((frame) => {
+    if (frame.payload[0] === 0xfe) powered = frame.payload[1] === 0;
+    else if (!powered) settingsWhileOff++;
+  });
+  __setNobleForTesting(noble);
+  const options = { address: "AA:BB:CC:DD:EE:FF", statePath };
+  const warmController = makeMeshController(options);
+  const otherController = makeMeshController(options);
+
+  await Effect.runPromise(warmController.send(activeCommands[0]!));
+  await Effect.runPromise(warmController.send(activeCommands[0]!));
+  expect(noble.frames.map((frame) => frame.payload[0])).toEqual([0xfe, 0xfe, 0xf0, 0xf0]);
+  await Effect.runPromise(otherController.send(Domain.Off.make({})));
+  expect(powered).toBe(false);
+  const beforeRestore = noble.frames.length;
+
+  await Effect.runPromise(warmController.send(activeCommands[0]!));
+  expect(noble.frames.slice(beforeRestore).map((frame) => frame.payload[0])).toEqual([
+    0xfe, 0xfe, 0xf0,
+  ]);
+  expect(powered).toBe(true);
+  expect(settingsWhileOff).toBe(0);
+  // Both controllers retain their own connected writer: source activity, not a
+  // reconnect, must trigger the extra wake on the first controller.
+  expect(noble.connections).toBe(2);
+  expect(noble.frames.map((frame) => frame.sequence)).toEqual(
+    Array.from({ length: 9 }, (_, index) => initialState.sequenceNumber + index),
+  );
+}, 15_000);
+
+test("a changed IV index invalidates confidence even when the next sequence number matches", async () => {
+  const statePath = join(dir, "state.json");
+  await Effect.runPromise(
+    saveMeshState(statePath, { ...initialState, sequenceDirectory: join(dir, "sequences") }),
+  );
+  const noble = new PowerNoble();
+  __setNobleForTesting(noble);
+  const controller = makeMeshController({ address: "AA:BB:CC:DD:EE:FF", statePath });
+  await Effect.runPromise(controller.send(activeCommands[0]!));
+  const previous = await Effect.runPromise(loadMeshState(statePath));
+  const changed = { ...previous, ivIndex: previous.ivIndex + 1 };
+  await Effect.runPromise(saveMeshState(statePath, changed));
+  noble.meshState = changed;
+  const beforeRestore = noble.frames.length;
+
+  await Effect.runPromise(controller.send(activeCommands[0]!));
+  expect(noble.frames.slice(beforeRestore).map((frame) => frame.payload[0])).toEqual([
+    0xfe, 0xfe, 0xf0,
+  ]);
+  expect(noble.frames[beforeRestore]!.sequence).toBe(previous.sequenceNumber);
+  expect(noble.connections).toBe(1);
 }, 15_000);

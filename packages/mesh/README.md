@@ -30,6 +30,12 @@ If cleanup fails, the retired writer remains fenced until a later cleanup succee
 Disconnected cached writers are replaced before sending; state-file failures
 are reported directly without retrying the Bluetooth connection.
 
+Power changes are sent twice. Cold connections, soft-off restores, and sends
+after another controller used the shared source send power-on twice before
+restoring settings; uninterrupted warm updates send only settings. This tracks
+our command history, not confirmed hardware state: physical buttons and apps
+using an independent sequence store are not observed.
+
 Pure-function modules (crypto, PDU codecs, V2 payload) are validated against
 captured wire bytes from the Python tool's `--dry-run` mode — see
 `tests/fixtures/`. 31 byte-exact round-trips assert that the two
