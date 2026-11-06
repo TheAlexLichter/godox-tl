@@ -12,6 +12,7 @@ import { matchAddress } from "./address.ts";
 import { BleError } from "./errors.ts";
 import { getNoble, type NobleLike, type PeripheralLike, withNobleOperation } from "./noble.ts";
 import { MESH_PROVISIONING_SERVICE_UUID, MESH_PROXY_SERVICE_UUID } from "./scan.ts";
+import { withScanCleanup } from "./scanSession.ts";
 import type { ProxyConnection, ProxyWriterConnection } from "./types.ts";
 
 const MESH_PROXY_DATA_IN_UUID = "2add"; // proxy client → server (writes)
@@ -70,6 +71,12 @@ const waitPoweredOn = (noble: NobleLike): Effect.Effect<void, BleError> =>
       );
     }, POWERED_ON_TIMEOUT_MS);
     noble.on("stateChange", onChange);
+
+    return Effect.sync(() => {
+      settled = true;
+      clearTimeout(timer);
+      noble.removeListener("stateChange", onChange);
+    });
   });
 
 const formatTimeout = (timeoutMs: number): string =>
@@ -94,40 +101,45 @@ const findPeripheral = (
   addresses: ReadonlyArray<string>,
   timeoutMs: number,
 ): Effect.Effect<Peripheral, BleError> =>
-  Effect.async<Peripheral, BleError>((resume) => {
-    let settled = false;
+  withScanCleanup(noble, (start) =>
+    Effect.async<Peripheral, BleError>((resume) => {
+      let settled = false;
 
-    const finish = (next: Effect.Effect<Peripheral, BleError>): void => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      noble.removeListener("discover", onDiscover);
-      noble.stopScanningAsync().catch(() => undefined);
-      resume(next);
-    };
+      const cleanup = (): void => {
+        clearTimeout(timer);
+        noble.removeListener("discover", onDiscover);
+      };
 
-    const onDiscover = (peripheral: PeripheralLike): void => {
-      if (addresses.some((address) => matchAddress(peripheral, address))) {
-        finish(Effect.succeed(peripheral as unknown as Peripheral));
-      }
-    };
+      const finish = (next: Effect.Effect<Peripheral, BleError>): void => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resume(next);
+      };
 
-    const targetSummary =
-      addresses.length === 1 ? `'${addresses[0]}'` : `[${addresses.join(", ")}]`;
-    const timer = setTimeout(() => {
-      finish(
-        Effect.fail(
-          new BleError({
-            message: `BLE peripheral ${targetSummary} not found within ${formatTimeout(timeoutMs)}. Is a same-mesh light powered on and in range?`,
-          }),
-        ),
+      const onDiscover = (peripheral: PeripheralLike): void => {
+        if (addresses.some((address) => matchAddress(peripheral, address))) {
+          finish(Effect.succeed(peripheral as unknown as Peripheral));
+        }
+      };
+
+      const targetSummary =
+        addresses.length === 1 ? `'${addresses[0]}'` : `[${addresses.join(", ")}]`;
+      const timer = setTimeout(() => {
+        finish(
+          Effect.fail(
+            new BleError({
+              message: `BLE peripheral ${targetSummary} not found within ${formatTimeout(timeoutMs)}. Is a same-mesh light powered on and in range?`,
+            }),
+          ),
+        );
+      }, timeoutMs);
+
+      noble.on("discover", onDiscover);
+      const startScanning = start(() =>
+        noble.startScanningAsync([MESH_PROXY_SERVICE_UUID, MESH_PROVISIONING_SERVICE_UUID], true),
       );
-    }, timeoutMs);
-
-    noble.on("discover", onDiscover);
-    noble
-      .startScanningAsync([MESH_PROXY_SERVICE_UUID, MESH_PROVISIONING_SERVICE_UUID], true)
-      .catch((cause: unknown) => {
+      startScanning.catch((cause: unknown) => {
         finish(
           Effect.fail(
             new BleError({
@@ -137,7 +149,13 @@ const findPeripheral = (
           ),
         );
       });
-  });
+
+      return Effect.sync(() => {
+        settled = true;
+        cleanup();
+      });
+    }),
+  );
 
 const POST_CONNECT_SETTLE_MS = 3_000;
 const DISCOVER_TIMEOUT_MS = 15_000;

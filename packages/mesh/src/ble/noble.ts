@@ -59,6 +59,46 @@ export interface NobleLike {
 let cached: NobleLike | undefined;
 let override: NobleLike | undefined;
 const nobleOperationMutex = Effect.unsafeMakeSemaphore(1);
+const pendingScanCleanups = new WeakMap<NobleLike, Promise<void>>();
+const SCAN_SHUTDOWN_TIMEOUT_MS = 3_000;
+
+export const awaitScanCleanup = async (cleanup: Promise<void>): Promise<void> => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      cleanup,
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, SCAN_SHUTDOWN_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+};
+
+/** Keep an adapter unavailable while a timed-out native scan shutdown finishes. */
+export const trackScanCleanup = (noble: NobleLike, cleanup: Promise<void>): void => {
+  pendingScanCleanups.set(noble, cleanup);
+  const clear = (): void => {
+    if (pendingScanCleanups.get(noble) === cleanup) pendingScanCleanups.delete(noble);
+  };
+  void cleanup.then(clear, clear);
+};
+
+export const ensureScanIdle = (noble: NobleLike): Effect.Effect<void, BleError> =>
+  Effect.suspend(() =>
+    pendingScanCleanups.has(noble)
+      ? Effect.fail(
+          new BleError({
+            message:
+              "Previous BLE scan shutdown is still pending; wait for it to finish before retrying.",
+          }),
+        )
+      : Effect.void,
+  );
+
+const checkedNoble = (noble: NobleLike): Effect.Effect<NobleLike, BleError> =>
+  ensureScanIdle(noble).pipe(Effect.as(noble));
 
 /** Test hook. Pass `undefined` to clear. */
 export const __setNobleForTesting = (noble: NobleLike | undefined): void => {
@@ -66,8 +106,8 @@ export const __setNobleForTesting = (noble: NobleLike | undefined): void => {
 };
 
 export const getNoble: Effect.Effect<NobleLike, BleError> = Effect.suspend(() => {
-  if (override) return Effect.succeed(override);
-  if (cached) return Effect.succeed(cached);
+  if (override) return checkedNoble(override);
+  if (cached) return checkedNoble(cached);
   return Effect.tryPromise({
     try: async () => {
       const mod = (await import("@stoprocent/noble")) as { default: NobleLike };
@@ -79,7 +119,7 @@ export const getNoble: Effect.Effect<NobleLike, BleError> = Effect.suspend(() =>
         cause,
         message: `Failed to load '@stoprocent/noble'. The native HCI binding may not be installed for this platform.`,
       }),
-  });
+  }).pipe(Effect.flatMap(checkedNoble));
 });
 
 /** Noble's Linux HCI backend is process-global around one adapter. Serializing
@@ -100,7 +140,14 @@ export const shutdownNoble: Effect.Effect<void> = Effect.promise(async () => {
   const noble = override ?? cached;
   if (!noble) return;
 
-  await noble.stopScanningAsync().catch(() => undefined);
+  let cleanup = pendingScanCleanups.get(noble);
+  if (!cleanup) {
+    cleanup = Promise.resolve()
+      .then(() => noble.stopScanningAsync())
+      .catch(() => undefined);
+    trackScanCleanup(noble, cleanup);
+  }
+  await awaitScanCleanup(cleanup);
   noble.stop?.();
-  cached = undefined;
+  if (cached === noble) cached = undefined;
 });

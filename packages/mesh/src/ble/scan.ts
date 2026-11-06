@@ -10,6 +10,7 @@ import { Effect } from "effect";
 import { BleError } from "./errors.ts";
 import { getNoble, type NobleLike, type PeripheralLike, withNobleOperation } from "./noble.ts";
 import type { BleScanOptions } from "./types.ts";
+import { withScanCleanup } from "./scanSession.ts";
 
 // Service UUIDs are normalised to lower-case 16-bit hex without dashes — that
 // matches noble's reported `serviceUuids` shape on macOS and Linux.
@@ -121,6 +122,11 @@ const waitForPoweredOn = (noble: NobleLike): Effect.Effect<void, BleError> =>
     };
 
     noble.on("stateChange", onChange);
+
+    return Effect.sync(() => {
+      settled = true;
+      cleanup();
+    });
   });
 
 /**
@@ -144,41 +150,44 @@ export const scanDevices = (
       const collected: DiscoveredDevice[] = [];
       const filter = opts.filter;
 
-      const result = yield* Effect.async<ReadonlyArray<DiscoveredDevice>, BleError>((resume) => {
-        let settled = false;
+      const result = yield* withScanCleanup(noble, (start) =>
+        Effect.async<ReadonlyArray<DiscoveredDevice>, BleError>((resume) => {
+          let settled = false;
 
-        const onDiscover = (peripheral: PeripheralLike): void => {
-          try {
-            const device = buildDiscoveredDevice(peripheral);
-            if (!device.address) return;
-            if (filter && !filter(device)) return;
-            collected.push(device);
-          } catch {
-            // Discovery callbacks must never throw; just skip a malformed entry.
-          }
-        };
+          const onDiscover = (peripheral: PeripheralLike): void => {
+            try {
+              const device = buildDiscoveredDevice(peripheral);
+              if (!device.address) return;
+              if (filter && !filter(device)) return;
+              collected.push(device);
+            } catch {
+              // Discovery callbacks must never throw; just skip a malformed entry.
+            }
+          };
 
-        noble.on("discover", onDiscover);
+          noble.on("discover", onDiscover);
 
-        const finish = (next: Effect.Effect<ReadonlyArray<DiscoveredDevice>, BleError>): void => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timer);
-          noble.removeListener("discover", onDiscover);
-          // Best-effort stop; we surface scan errors but ignore stop errors.
-          noble.stopScanningAsync().catch(() => undefined);
-          resume(next);
-        };
+          const finish = (next: Effect.Effect<ReadonlyArray<DiscoveredDevice>, BleError>): void => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            noble.removeListener("discover", onDiscover);
+            resume(next);
+          };
 
-        const timer = setTimeout(() => {
-          finish(Effect.succeed(dedupeDevices(collected)));
-        }, timeoutSeconds * 1_000);
+          const timer = setTimeout(() => {
+            finish(Effect.succeed(dedupeDevices(collected)));
+          }, timeoutSeconds * 1_000);
 
-        // `allowDuplicates: true` so we receive fresh RSSI per advertisement
-        // instead of a single cached report per device.
-        noble
-          .startScanningAsync([MESH_PROXY_SERVICE_UUID, MESH_PROVISIONING_SERVICE_UUID], true)
-          .catch((cause: unknown) => {
+          // `allowDuplicates: true` so we receive fresh RSSI per advertisement
+          // instead of a single cached report per device.
+          const startScanning = start(() =>
+            noble.startScanningAsync(
+              [MESH_PROXY_SERVICE_UUID, MESH_PROVISIONING_SERVICE_UUID],
+              true,
+            ),
+          );
+          startScanning.catch((cause: unknown) => {
             finish(
               Effect.fail(
                 new BleError({
@@ -189,14 +198,14 @@ export const scanDevices = (
             );
           });
 
-        return Effect.sync(() => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timer);
-          noble.removeListener("discover", onDiscover);
-          noble.stopScanningAsync().catch(() => undefined);
-        });
-      });
+          return Effect.sync(() => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            noble.removeListener("discover", onDiscover);
+          });
+        }),
+      );
 
       return result;
     }),
