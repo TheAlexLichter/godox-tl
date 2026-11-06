@@ -458,7 +458,7 @@ test("connectProxyWriter: direct connection skips scanning when address type is 
   await Effect.runPromise(connection.close());
 });
 
-test("connectProxyWriter: scans if direct connection fails", async () => {
+test("connectProxyWriter: scans same-mesh fallback peers if direct connection fails", async () => {
   let scanCount = 0;
   let cancelCount = 0;
   let peripheralConnectCount = 0;
@@ -477,7 +477,7 @@ test("connectProxyWriter: scans if direct connection fails", async () => {
     async startScanningAsync(): Promise<void> {
       scanCount++;
       const peripheral = {
-        address: "A4:C1:38:21:09:80",
+        address: "A4:C1:38:1B:F8:73",
         state: "connected",
         connectAsync: async () => {
           peripheralConnectCount++;
@@ -500,13 +500,42 @@ test("connectProxyWriter: scans if direct connection fails", async () => {
 
   __setNobleForTesting(new FallbackNoble());
   const connection = await Effect.runPromise(
-    connectProxyWriter("A4:C1:38:21:09:80", { directAddressType: "public" }),
+    connectProxyWriter("A4:C1:38:21:09:80", {
+      directAddressType: "public",
+      fallbackAddresses: ["a4:c1:38:1b:f8:73"],
+      findPeripheralTimeoutMs: 50,
+    }),
   );
 
   expect(scanCount).toBe(1);
   expect(cancelCount).toBe(1);
   expect(peripheralConnectCount).toBe(1);
   await Effect.runPromise(connection.close());
+});
+
+test("connectProxyWriter: direct fallback respects the configured scan timeout", async () => {
+  let scanCount = 0;
+  class MissingNoble extends EventEmitter implements NobleLike {
+    state = "poweredOn";
+    async connectAsync(): Promise<PeripheralLike> {
+      throw new Error("direct connection unavailable");
+    }
+    async startScanningAsync(): Promise<void> {
+      scanCount++;
+    }
+    async stopScanningAsync(): Promise<void> {}
+  }
+  __setNobleForTesting(new MissingNoble());
+  const startedAt = Date.now();
+  const result = await Effect.runPromiseExit(
+    connectProxyWriter("A4:C1:38:21:09:80", {
+      directAddressType: "public",
+      findPeripheralTimeoutMs: 25,
+    }),
+  );
+  expect(result._tag).toBe("Failure");
+  expect(scanCount).toBe(1);
+  expect(Date.now() - startedAt).toBeLessThan(1_000);
 });
 
 test("connectProxyWriter: closes a direct connection that succeeds after timeout", async () => {

@@ -8,6 +8,7 @@ import {
   saveRegistry,
 } from "@godox-tl/core";
 import {
+  loadMeshState,
   normalizeAddress,
   provisionAndRebind,
   scanDevices as meshScanDevices,
@@ -46,6 +47,65 @@ export interface ProvisionResult {
   readonly newlyProvisioned: boolean;
 }
 
+interface MeshProvisioningPlan {
+  readonly networkKey?: Uint8Array;
+  readonly appKey?: Uint8Array;
+  readonly nextNodeAddress?: number;
+  readonly sourceName?: string;
+}
+
+const bytesToHex = (bytes: Uint8Array): string =>
+  Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+
+const meshProvisioningPlan = (
+  entries: ReadonlyArray<LightEntry>,
+  visibleAddresses: ReadonlySet<string>,
+) =>
+  Effect.gen(function* () {
+    const groups = new Map<
+      string,
+      {
+        readonly networkKey: Uint8Array;
+        readonly appKey: Uint8Array;
+        readonly sourceName: string;
+        readonly nodeAddresses: Set<number>;
+        visibleCount: number;
+      }
+    >();
+
+    for (const entry of entries) {
+      const state = yield* loadMeshState(entry.statePath).pipe(
+        Effect.orElseSucceed(() => undefined),
+      );
+      if (!state) continue;
+      const key = `${bytesToHex(state.networkKey)}:${bytesToHex(state.appKey)}`;
+      const existing = groups.get(key);
+      if (existing) {
+        existing.nodeAddresses.add(state.nodeAddress);
+        if (visibleAddresses.has(normalizeAddress(entry.address))) existing.visibleCount++;
+      } else {
+        groups.set(key, {
+          networkKey: state.networkKey,
+          appKey: state.appKey,
+          sourceName: entry.name,
+          nodeAddresses: new Set([state.nodeAddress]),
+          visibleCount: visibleAddresses.has(normalizeAddress(entry.address)) ? 1 : 0,
+        });
+      }
+    }
+
+    const [selected] = [...groups.values()].sort(
+      (a, b) => b.visibleCount - a.visibleCount || b.nodeAddresses.size - a.nodeAddresses.size,
+    );
+    if (!selected) return {} satisfies MeshProvisioningPlan;
+    return {
+      networkKey: selected.networkKey,
+      appKey: selected.appKey,
+      nextNodeAddress: Math.max(...selected.nodeAddresses) + 1,
+      sourceName: selected.sourceName,
+    } satisfies MeshProvisioningPlan;
+  });
+
 const scanGodoxDevices = (config: ResolvedConfig, timeoutSeconds: number) =>
   Effect.gen(function* () {
     yield* Effect.logDebug(`BLE scan starting (${timeoutSeconds}s)`);
@@ -75,13 +135,13 @@ const scanGodoxDevices = (config: ResolvedConfig, timeoutSeconds: number) =>
 
 const provisionCandidates = (
   config: ResolvedConfig,
-  knownAddresses: ReadonlySet<string>,
+  knownEntries: ReadonlyArray<LightEntry>,
   devices: ReadonlyArray<DiscoveredDevice>,
 ) =>
   Effect.gen(function* () {
     // Address comparison is format-insensitive: noble strips dashes on some
     // platforms while registries may carry user-entered separators.
-    const knownNormalized = new Set(Array.from(knownAddresses, normalizeAddress));
+    const knownNormalized = new Set(knownEntries.map((entry) => normalizeAddress(entry.address)));
     const candidates = devices.filter(
       (d) => d.unprovisioned && config.discoveryFilters.some((r) => r.test(d.name)),
     );
@@ -115,12 +175,32 @@ const provisionCandidates = (
       yield* Effect.sleep("1500 millis");
     }
 
+    const visibleProvisionedAddresses = new Set(
+      devices.filter((d) => !d.unprovisioned).map((d) => normalizeAddress(d.address)),
+    );
+    const plan =
+      candidates.length > 0
+        ? yield* meshProvisioningPlan(knownEntries, visibleProvisionedAddresses)
+        : ({} satisfies MeshProvisioningPlan);
+    let nextNodeAddress = plan.nextNodeAddress;
+    if (plan.sourceName && nextNodeAddress !== undefined) {
+      yield* Effect.logInfo(
+        `Auto-provision will join existing mesh from ${plan.sourceName}; next node address=0x${nextNodeAddress.toString(16)}`,
+      );
+    }
+
     for (const dev of candidates) {
       const name = expandName(config.nameTemplate, dev.address);
       const statePath = join(statesDir, `${name}.json`);
       const outcome = yield* Effect.scoped(
         Effect.gen(function* () {
-          const r = yield* provisionAndRebind(dev.address, { statePath });
+          const r = yield* provisionAndRebind(dev.address, {
+            appKey: plan.appKey,
+            networkKey: plan.networkKey,
+            nodeAddress: nextNodeAddress,
+            statePath,
+          });
+          if (nextNodeAddress !== undefined) nextNodeAddress++;
           return yield* register(
             { name, address: dev.address, statePath, nodeAddress: r.state.nodeAddress },
             config.registryPath,
@@ -222,11 +302,7 @@ export const runStartupScan = (config: ResolvedConfig, entries: ReadonlyArray<Li
 
     const knownBeforeProvision = [...entries, ...recovered];
     const provisioned = config.autoProvisionOnStartup
-      ? yield* provisionCandidates(
-          config,
-          new Set(knownBeforeProvision.map((e) => e.address)),
-          devices,
-        )
+      ? yield* provisionCandidates(config, knownBeforeProvision, devices)
       : [];
     const allEntries = [...knownBeforeProvision, ...provisioned.map((r) => r.entry)];
 
@@ -270,11 +346,14 @@ export const runStartupScan = (config: ResolvedConfig, entries: ReadonlyArray<Li
  * and whose address isn't already registered, invokes provision + rebind +
  * register. Skips silently on `ProvisioningTimeoutError` — the light is
  * probably already paired to another network. */
-export const runDiscoveryCycle = (config: ResolvedConfig, knownAddresses: ReadonlySet<string>) =>
+export const runDiscoveryCycle = (
+  config: ResolvedConfig,
+  knownEntries: ReadonlyArray<LightEntry>,
+) =>
   Effect.gen(function* () {
     if (!config.autoProvision) return [] as ReadonlyArray<ProvisionResult>;
 
     const scanTimeoutSeconds = Math.min(10, config.scanIntervalSeconds);
     const devices = yield* scanGodoxDevices(config, scanTimeoutSeconds);
-    return yield* provisionCandidates(config, knownAddresses, devices);
+    return yield* provisionCandidates(config, knownEntries, devices);
   });

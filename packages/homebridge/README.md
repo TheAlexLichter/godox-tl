@@ -103,6 +103,9 @@ settings form. The platform alias is:
 | `startupPruneMissing`    | `false`               | Remove registry entries missed by the startup scan. Leave off for normal BLE use; short scans can miss lights. |
 | `autoProvisionOnStartup` | `false`               | Provision matching factory-reset lights during the startup scan even when periodic auto-provision is off.      |
 | `scanIntervalSeconds`    | `60`                  | Periodic scan interval. Clamped to at least 10 seconds.                                                        |
+| `bleFindTimeoutMs`       | `20000`               | Per-command scan timeout for finding the target light before reporting it missing.                             |
+| `bleWriteTimeoutMs`      | `5000`                | Per-command GATT write timeout after the light is connected.                                                   |
+| `bleSendTimeoutMs`       | `70000`               | Hard timeout for the full scan, connect, discovery, and write flow.                                            |
 | `discoveryFilters`       | `["^GD_LED$"]`        | JavaScript regex patterns matched against advertised BLE names.                                                |
 | `nameTemplate`           | `"godox-{shortAddr}"` | Name assigned to auto-provisioned lights. `{shortAddr}` expands to the last 6 hex chars of the BLE address.    |
 | `enableColor`            | `true`                | Adds HomeKit `Hue` and `Saturation` controls backed by Godox HSI mode.                                         |
@@ -132,6 +135,15 @@ and then resets the switch to off.
 - Confirm the Linux BLE capability is set on the same `node` binary used by
   Homebridge.
 - Run `godox scan` on the same host to verify the adapter can see the light.
+- If control commands often say the light was not found, keep the light powered
+  and nearby, then raise `bleFindTimeoutMs` (for example `30000`). If commands
+  reach the light but time out during connect/discovery/write, raise
+  `bleSendTimeoutMs`.
+- For the most reliable control, provision lights into one shared mesh. Current
+  auto-provisioning reuses the largest existing mesh and assigns the next node
+  address, so any reachable same-mesh light can act as the BLE proxy. Older
+  registries may have one private mesh per light; factory-reset and re-provision
+  those lights to enable proxy fallback between them.
 - Factory-reset the TL30 if it does not appear as an unprovisioned device.
 - Enable `autoProvisionOnStartup` or `autoProvision` before expecting
   Homebridge to provision factory-reset lights.

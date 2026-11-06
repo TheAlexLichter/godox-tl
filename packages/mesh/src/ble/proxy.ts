@@ -17,13 +17,15 @@ import type { ProxyConnection, ProxyWriterConnection } from "./types.ts";
 const MESH_PROXY_DATA_IN_UUID = "2add"; // proxy client → server (writes)
 const MESH_PROXY_DATA_OUT_UUID = "2ade"; // server → proxy client (notifications)
 
-const FIND_PERIPHERAL_TIMEOUT_MS = 20_000;
+const DEFAULT_FIND_PERIPHERAL_TIMEOUT_MS = 20_000;
 const POWERED_ON_TIMEOUT_MS = 5_000;
 const DIRECT_CONNECT_TIMEOUT_MS = 4_000;
 
 export interface ProxyConnectOptions {
   /** Override address-type inference for a direct connection attempt. */
   readonly directAddressType?: "public" | "random";
+  readonly findPeripheralTimeoutMs?: number;
+  readonly fallbackAddresses?: ReadonlyArray<string>;
 }
 
 // A random BLE address cannot start with bit pattern 10 (reserved by the
@@ -70,7 +72,28 @@ const waitPoweredOn = (noble: NobleLike): Effect.Effect<void, BleError> =>
     noble.on("stateChange", onChange);
   });
 
-const findPeripheral = (noble: NobleLike, address: string): Effect.Effect<Peripheral, BleError> =>
+const formatTimeout = (timeoutMs: number): string =>
+  timeoutMs % 1_000 === 0 ? `${timeoutMs / 1_000}s` : `${timeoutMs}ms`;
+
+const candidateAddresses = (
+  address: string,
+  fallbacks: ReadonlyArray<string> = [],
+): ReadonlyArray<string> => {
+  const seen = new Set<string>();
+  const addresses: string[] = [];
+  for (const candidate of [address, ...fallbacks]) {
+    if (!candidate || seen.has(candidate)) continue;
+    seen.add(candidate);
+    addresses.push(candidate);
+  }
+  return addresses;
+};
+
+const findPeripheral = (
+  noble: NobleLike,
+  addresses: ReadonlyArray<string>,
+  timeoutMs: number,
+): Effect.Effect<Peripheral, BleError> =>
   Effect.async<Peripheral, BleError>((resume) => {
     let settled = false;
 
@@ -84,20 +107,22 @@ const findPeripheral = (noble: NobleLike, address: string): Effect.Effect<Periph
     };
 
     const onDiscover = (peripheral: PeripheralLike): void => {
-      if (matchAddress(peripheral, address)) {
+      if (addresses.some((address) => matchAddress(peripheral, address))) {
         finish(Effect.succeed(peripheral as unknown as Peripheral));
       }
     };
 
+    const targetSummary =
+      addresses.length === 1 ? `'${addresses[0]}'` : `[${addresses.join(", ")}]`;
     const timer = setTimeout(() => {
       finish(
         Effect.fail(
           new BleError({
-            message: `BLE peripheral '${address}' not found within ${FIND_PERIPHERAL_TIMEOUT_MS / 1000}s. Is the light powered on and in range?`,
+            message: `BLE peripheral ${targetSummary} not found within ${formatTimeout(timeoutMs)}. Is a same-mesh light powered on and in range?`,
           }),
         ),
       );
-    }, FIND_PERIPHERAL_TIMEOUT_MS);
+    }, timeoutMs);
 
     noble.on("discover", onDiscover);
     noble
@@ -107,7 +132,7 @@ const findPeripheral = (noble: NobleLike, address: string): Effect.Effect<Periph
           Effect.fail(
             new BleError({
               cause,
-              message: `Failed to start scan while looking for '${address}'`,
+              message: `Failed to start scan while looking for ${targetSummary}`,
             }),
           ),
         );
@@ -296,6 +321,11 @@ const openProxyPeripheral = (
   options: ProxyConnectOptions,
 ): Effect.Effect<{ readonly peripheral: Peripheral; readonly direct: boolean }, BleError> =>
   Effect.gen(function* () {
+    const addresses = candidateAddresses(address, options.fallbackAddresses);
+    const findPeripheralTimeoutMs = Math.max(
+      1,
+      options.findPeripheralTimeoutMs ?? DEFAULT_FIND_PERIPHERAL_TIMEOUT_MS,
+    );
     yield* Effect.logDebug(`[ble] waitPoweredOn`);
     yield* waitPoweredOn(noble);
 
@@ -353,7 +383,7 @@ const openProxyPeripheral = (
     }
 
     yield* Effect.logDebug(`[ble] scanning for ${address}`);
-    const peripheral = yield* findPeripheral(noble, address);
+    const peripheral = yield* findPeripheral(noble, addresses, findPeripheralTimeoutMs);
     yield* Effect.logDebug(`[ble] found peripheral; connecting ${address}`);
     yield* connectPeripheral(peripheral, address);
     return { peripheral, direct: false };

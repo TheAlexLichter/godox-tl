@@ -48,6 +48,7 @@ export type {
   NobleLike,
   PeripheralAdvertisementLike,
   PeripheralLike,
+  ProxyConnectOptions,
   ProxyConnection,
   ProxyWriterConnection,
 } from "./ble/index.ts";

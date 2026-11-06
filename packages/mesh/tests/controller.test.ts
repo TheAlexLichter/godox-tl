@@ -8,6 +8,12 @@ import { afterEach, beforeEach, expect, test } from "vite-plus/test";
 import { __setNobleForTesting, MESH_PROXY_SERVICE_UUID } from "../src/ble/index.ts";
 import type { NobleLike, PeripheralLike } from "../src/ble/noble.ts";
 import { makeMeshController } from "../src/controller.ts";
+import { k2 } from "../src/crypto/kdf.ts";
+import { applicationNonce } from "../src/crypto/nonces.ts";
+import { decodeUnsegmentedAccess } from "../src/pdu/lowerTransport.ts";
+import { decodeNetworkPdu } from "../src/pdu/network.ts";
+import { decodeProxyPdu } from "../src/pdu/proxy.ts";
+import { decryptAccessPdu } from "../src/pdu/upperTransport.ts";
 import { loadMeshState, saveMeshState, type MeshState } from "../src/state.ts";
 
 const { Cct, kelvin, pct } = Domain;
@@ -45,13 +51,13 @@ class FakeCharacteristic extends EventEmitter {
 
   constructor(
     readonly uuid: string,
-    private readonly onWrite?: () => Promise<void>,
+    private readonly onWrite?: (data: Buffer) => Promise<void>,
   ) {
     super();
   }
 
-  async writeAsync(): Promise<void> {
-    await this.onWrite?.();
+  async writeAsync(data: Buffer): Promise<void> {
+    await this.onWrite?.(data);
   }
 
   async subscribeAsync(): Promise<void> {}
@@ -62,11 +68,17 @@ class FakeCharacteristic extends EventEmitter {
 class FakeService {
   readonly uuid = MESH_PROXY_SERVICE_UUID;
 
+  constructor(private readonly onWrite?: (data: Buffer) => Promise<void>) {}
+
   async discoverCharacteristicsAsync(): Promise<FakeCharacteristic[]> {
     return [
-      new FakeCharacteristic("2add", async () => {
-        await chmod(dir, 0o500);
-      }),
+      new FakeCharacteristic(
+        "2add",
+        this.onWrite ??
+          (async () => {
+            await chmod(dir, 0o500);
+          }),
+      ),
       new FakeCharacteristic("2ade"),
     ];
   }
@@ -74,6 +86,10 @@ class FakeService {
 
 class FakeNoble extends EventEmitter implements NobleLike {
   state = "poweredOn";
+
+  constructor(private readonly onWrite?: (data: Buffer) => Promise<void>) {
+    super();
+  }
 
   async startScanningAsync(): Promise<void> {
     const peripheral: PeripheralLike & {
@@ -87,7 +103,7 @@ class FakeNoble extends EventEmitter implements NobleLike {
       advertisement: { localName: "GD_LED", serviceUuids: [MESH_PROXY_SERVICE_UUID] },
       connectAsync: async () => {},
       disconnectAsync: async () => {},
-      discoverServicesAsync: async () => [new FakeService()],
+      discoverServicesAsync: async () => [new FakeService(this.onWrite)],
     };
     queueMicrotask(() => this.emit("discover", peripheral));
   }
@@ -109,7 +125,51 @@ test("mesh controller reserves the next sequence number before writing to BLE", 
   );
 
   const raw = JSON.parse(await readFile(statePath, "utf8")) as { sequence_number: number };
-  expect(raw.sequence_number).toBe(8);
+  expect(raw.sequence_number).toBe(9);
+});
+
+test("mesh controller wakes a soft-off fixture before restoring its brightness and color", async () => {
+  const statePath = join(dir, "state.json");
+  const initial = sampleState(7);
+  await Effect.runPromise(saveMeshState(statePath, initial));
+  const { encryptionKey, privacyKey } = k2(initial.networkKey, Uint8Array.of(0));
+  let powered = true;
+  let brightness = 0;
+  const sequences: number[] = [];
+
+  __setNobleForTesting(
+    new FakeNoble(async (data) => {
+      const network = decodeNetworkPdu({
+        pdu: decodeProxyPdu(data).payload,
+        ivIndex: initial.ivIndex,
+        encryptionKey,
+        privacyKey,
+      });
+      const access = decryptAccessPdu({
+        encryptedAccessPdu: decodeUnsegmentedAccess(network.lowerTransportPdu).encryptedAccessPdu,
+        appKey: initial.appKey,
+        nonce: applicationNonce({ aszmic: 0, ...network, ivIndex: initial.ivIndex }),
+        szmic: 0,
+      });
+      sequences.push(network.seq);
+      const payload = access.subarray(3);
+      if (payload[0] === 0xfe) powered = payload[1] === 0;
+      else {
+        expect(powered).toBe(true);
+        brightness = payload[1]!;
+      }
+    }),
+  );
+  const controller = makeMeshController({ address: "AA:BB:CC:DD:EE:FF", statePath });
+  await Effect.runPromise(controller.send(Domain.Off.make({})));
+  expect(powered).toBe(false);
+  await Effect.runPromise(
+    controller.send(Cct.make({ brightness: pct(30), temperature: kelvin(4000) })),
+  );
+  expect(powered).toBe(true);
+  expect(brightness).toBe(30);
+  expect(sequences).toEqual([7, 8, 9]);
+  expect((await Effect.runPromise(loadMeshState(statePath))).sequenceNumber).toBe(10);
 });
 
 test("mesh controller serializes concurrent sends so each command reserves a unique sequence number", async () => {
@@ -131,7 +191,7 @@ test("mesh controller serializes concurrent sends so each command reserves a uni
   );
 
   const state = await Effect.runPromise(loadMeshState(statePath));
-  expect(state.sequenceNumber).toBe(15);
+  expect(state.sequenceNumber).toBe(23);
 });
 
 test("mesh controller coalesces queued sends and reuses a warm proxy writer", async () => {
@@ -222,8 +282,8 @@ test("mesh controller coalesces queued sends and reuses a warm proxy writer", as
   await Promise.all([first, second, third]);
 
   const state = await Effect.runPromise(loadMeshState(statePath));
-  expect(state.sequenceNumber).toBe(9);
-  expect(writeCount).toBe(2);
+  expect(state.sequenceNumber).toBe(11);
+  expect(writeCount).toBe(4);
   expect(connectCount).toBe(1);
 });
 
@@ -330,8 +390,8 @@ test("mesh controller serializes queued sends when coalescing is disabled", asyn
   const state = await Effect.runPromise(loadMeshState(statePath));
   expect(writeCountBeforeRelease).toBe(1);
   expect(maxConcurrentWritesBeforeRelease).toBe(1);
-  expect(state.sequenceNumber).toBe(10);
-  expect(writeCount).toBe(3);
+  expect(state.sequenceNumber).toBe(13);
+  expect(writeCount).toBe(6);
   expect(connectCount).toBe(1);
 });
 
@@ -403,5 +463,36 @@ test("mesh controller times out a hung GATT write and closes the writer", async 
   expect(exit._tag).toBe("Failure");
   expect(writeCount).toBe(1);
   expect(disconnectCount).toBe(1);
-  expect(state.sequenceNumber).toBe(8);
+  expect(state.sequenceNumber).toBe(9);
+});
+
+test("mesh controller allows the peripheral scan timeout to be shortened", async () => {
+  const statePath = join(dir, "state.json");
+  await Effect.runPromise(saveMeshState(statePath, sampleState(7)));
+
+  let scanCount = 0;
+
+  class EmptyScanNoble extends EventEmitter implements NobleLike {
+    state = "poweredOn";
+
+    async startScanningAsync(): Promise<void> {
+      scanCount++;
+    }
+
+    async stopScanningAsync(): Promise<void> {}
+  }
+
+  __setNobleForTesting(new EmptyScanNoble());
+  const controller = makeMeshController({
+    address: "AA:BB:CC:DD:EE:FF",
+    statePath,
+    findPeripheralTimeoutMs: 25,
+  });
+
+  const exit = await Effect.runPromiseExit(
+    controller.send(Cct.make({ brightness: pct(10), temperature: kelvin(3200) })),
+  );
+
+  expect(exit._tag).toBe("Failure");
+  expect(scanCount).toBe(1);
 });

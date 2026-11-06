@@ -10,6 +10,7 @@ import {
   encodeFx,
   encodeHsi,
   encodeOff,
+  encodeOn,
   encodeRgbw,
   encodeSet,
   VENDOR_OPCODE,
@@ -30,7 +31,11 @@ export interface MeshControllerOptions {
   readonly connectionIdleMs?: number;
   /** Timeout for a single GATT write. Defaults to 5s. */
   readonly writeTimeoutMs?: number;
-  /** Hard timeout for one queued send, including scan/connect/discovery/write. Defaults to 30s. */
+  /** Timeout for the BLE scan that finds the target peripheral. Defaults to 20s. */
+  readonly findPeripheralTimeoutMs?: number;
+  /** Same-mesh BLE proxy addresses that can be used when the target peripheral is not visible. */
+  readonly proxyAddresses?: ReadonlyArray<string>;
+  /** Hard timeout for one queued send, including scan/connect/discovery/write. Defaults to about 70s. */
   readonly sendTimeoutMs?: number;
   /** Collapse queued in-flight sends to the newest command. Defaults to true for persistent connections. */
   readonly coalesce?: boolean;
@@ -106,7 +111,11 @@ export const makeMeshController = (options: MeshControllerOptions): LightControl
   const coalesce = options.coalesce ?? persistent;
   const idleMs = Math.max(0, options.connectionIdleMs ?? 30_000);
   const writeTimeoutMs = Math.max(1, options.writeTimeoutMs ?? 5_000);
-  const sendTimeoutMs = Math.max(1, options.sendTimeoutMs ?? 30_000);
+  const findPeripheralTimeoutMs = Math.max(1, options.findPeripheralTimeoutMs ?? 20_000);
+  const sendTimeoutMs = Math.max(
+    1,
+    options.sendTimeoutMs ?? findPeripheralTimeoutMs + writeTimeoutMs + 45_000,
+  );
   const stateMutex = mutexForStatePath(options.statePath);
 
   let writer: ProxyWriterConnection | undefined;
@@ -150,7 +159,12 @@ export const makeMeshController = (options: MeshControllerOptions): LightControl
     }
     const startedAt = Date.now();
     return Effect.logDebug(`[mesh] opening writer for ${options.address}`).pipe(
-      Effect.zipRight(connectProxyWriter(options.address)),
+      Effect.zipRight(
+        connectProxyWriter(options.address, {
+          fallbackAddresses: options.proxyAddresses,
+          findPeripheralTimeoutMs,
+        }),
+      ),
       Effect.tap((conn) =>
         Effect.sync(() => {
           writer = conn;
@@ -180,24 +194,29 @@ export const makeMeshController = (options: MeshControllerOptions): LightControl
       Effect.tapError(() => Effect.promise(closeWriter)),
     );
 
-  const writePdu = (proxyPdu: Uint8Array): Effect.Effect<void, TransportError> =>
+  const writePdus = (proxyPdus: ReadonlyArray<Uint8Array>): Effect.Effect<void, TransportError> =>
     Effect.gen(function* () {
       clearIdleTimer();
       const conn = yield* writerForSend();
       const startedAt = Date.now();
-      yield* Effect.logDebug(`[mesh] writing ${proxyPdu.byteLength} bytes to ${options.address}`);
-      yield* conn.write(proxyPdu).pipe(
-        Effect.mapError((e) => transportError(options.address, e)),
-        Effect.timeoutFail({
-          duration: Duration.millis(writeTimeoutMs),
-          onTimeout: () =>
-            transportError(options.address, new Error(`write timed out after ${writeTimeoutMs}ms`)),
-        }),
-      );
+      for (const proxyPdu of proxyPdus) {
+        yield* Effect.logDebug(`[mesh] writing ${proxyPdu.byteLength} bytes to ${options.address}`);
+        yield* conn.write(proxyPdu).pipe(
+          Effect.mapError((e) => transportError(options.address, e)),
+          Effect.timeoutFail({
+            duration: Duration.millis(writeTimeoutMs),
+            onTimeout: () =>
+              transportError(
+                options.address,
+                new Error(`write timed out after ${writeTimeoutMs}ms`),
+              ),
+          }),
+        );
+        yield* Effect.sleep("100 millis");
+      }
       yield* Effect.logDebug(
         `[mesh] write complete for ${options.address} in ${Date.now() - startedAt}ms`,
       );
-      yield* Effect.sleep("100 millis");
       yield* Effect.sync(scheduleIdleClose);
     }).pipe(
       Effect.catchAll((e) =>
@@ -210,8 +229,11 @@ export const makeMeshController = (options: MeshControllerOptions): LightControl
   ): Effect.Effect<void, TransportError | TransportUnsupportedError> =>
     Effect.gen(function* () {
       const payload = yield* buildPayload(cmd);
+      // Brightness and color commands do not clear the fixture's soft power-off
+      // state. Wake it explicitly before applying an active command.
+      const payloads = cmd._tag === "Off" ? [payload] : [encodeOn(), payload];
 
-      const proxyPdu = yield* Effect.gen(function* () {
+      const proxyPdus = yield* Effect.gen(function* () {
         const state: MeshState = yield* loadMeshState(options.statePath).pipe(
           Effect.mapError(
             (e) =>
@@ -222,20 +244,22 @@ export const makeMeshController = (options: MeshControllerOptions): LightControl
           ),
         );
 
-        const pdu = encodeGodoxFrame({
-          netKey: state.networkKey,
-          appKey: state.appKey,
-          src: state.provisionerAddress,
-          dst: state.nodeAddress,
-          seq: state.sequenceNumber,
-          ivIndex: state.ivIndex,
-          vendorOpcode: VENDOR_OPCODE,
-          godoxV2Payload: payload,
-        });
+        const pdus = payloads.map((godoxV2Payload, index) =>
+          encodeGodoxFrame({
+            netKey: state.networkKey,
+            appKey: state.appKey,
+            src: state.provisionerAddress,
+            dst: state.nodeAddress,
+            seq: state.sequenceNumber + index,
+            ivIndex: state.ivIndex,
+            vendorOpcode: VENDOR_OPCODE,
+            godoxV2Payload,
+          }),
+        );
 
         const nextState: MeshState = {
           ...state,
-          sequenceNumber: state.sequenceNumber + 1,
+          sequenceNumber: state.sequenceNumber + pdus.length,
         };
         yield* saveMeshState(options.statePath, nextState).pipe(
           Effect.mapError(
@@ -248,19 +272,21 @@ export const makeMeshController = (options: MeshControllerOptions): LightControl
         );
 
         if (options.dryRun) {
-          yield* Effect.logInfo(
-            `[mesh dry-run] addr=${options.address} seq=${state.sequenceNumber} pdu=${Array.from(
-              pdu,
-              (b) => b.toString(16).padStart(2, "0"),
-            ).join("")}`,
-          );
+          for (const [index, pdu] of pdus.entries()) {
+            yield* Effect.logInfo(
+              `[mesh dry-run] addr=${options.address} seq=${state.sequenceNumber + index} pdu=${Array.from(
+                pdu,
+                (b) => b.toString(16).padStart(2, "0"),
+              ).join("")}`,
+            );
+          }
         }
-        return pdu;
+        return pdus;
       }).pipe(stateMutex.withPermits(1));
 
       if (!options.dryRun) {
         yield* Effect.logDebug(`[mesh] sending ${cmd._tag} to ${options.address}`);
-        yield* writePdu(proxyPdu);
+        yield* writePdus(proxyPdus);
         yield* Effect.logDebug(`[mesh] sent ${cmd._tag} to ${options.address}`);
       }
     });

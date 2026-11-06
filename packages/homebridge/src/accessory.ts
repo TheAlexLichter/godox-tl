@@ -70,6 +70,12 @@ export interface HomeKitFeatureConfig {
   readonly enableColor: boolean;
   readonly fxPresets: ReadonlyArray<FxPreset>;
   readonly rgbwPresets: ReadonlyArray<RgbwPreset>;
+  readonly mesh?: {
+    readonly findPeripheralTimeoutMs?: number;
+    readonly proxyAddresses?: ReadonlyArray<string>;
+    readonly sendTimeoutMs?: number;
+    readonly writeTimeoutMs?: number;
+  };
 }
 
 /** Wraps one Service.Lightbulb for one registered light. */
@@ -113,7 +119,11 @@ export class GodoxLightAccessory {
     },
     debounceMs = 100,
   ) {
-    this.controller = makeMeshController({ address: entry.address, statePath: entry.statePath });
+    this.controller = makeMeshController({
+      address: entry.address,
+      statePath: entry.statePath,
+      ...features.mesh,
+    });
     this.loggerLayer = homebridgeLoggerLayer(log);
 
     this.accessory
@@ -346,12 +356,30 @@ export class GodoxLightAccessory {
 
   private runCommand(cmd: Domain.LightCommand, after?: () => void): void {
     Effect.runPromise(
-      (this.controller.send(cmd) as Effect.Effect<void>).pipe(Effect.provide(this.loggerLayer)),
+      (this.controller.send(cmd) as Effect.Effect<void, unknown>).pipe(
+        Effect.provide(this.loggerLayer),
+        Effect.catchAll((err) =>
+          Effect.sync(() => {
+            this.log.warn(`[${this.entry.name}] send failed: ${this.formatSendError(err)}`);
+          }),
+        ),
+      ),
     )
       .catch((err: unknown) => {
-        this.log.error(`[${this.entry.name}] send failed:`, err);
+        this.log.error(
+          `[${this.entry.name}] send failed unexpectedly: ${this.formatSendError(err)}`,
+        );
       })
       .finally(after);
+  }
+
+  private formatSendError(err: unknown): string {
+    if (err instanceof Error) return err.message;
+    if (typeof err === "object" && err !== null) {
+      const message = (err as { readonly message?: unknown }).message;
+      if (typeof message === "string") return message;
+    }
+    return String(err);
   }
 
   private addMomentarySwitch(

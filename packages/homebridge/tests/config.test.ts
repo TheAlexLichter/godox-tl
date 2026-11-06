@@ -9,6 +9,9 @@ test("resolveConfig applies sensible defaults", () => {
   expect(cfg.startupPruneMissing).toBe(false);
   expect(cfg.autoProvisionOnStartup).toBe(false);
   expect(cfg.scanIntervalSeconds).toBe(60);
+  expect(cfg.bleFindTimeoutMs).toBe(20_000);
+  expect(cfg.bleWriteTimeoutMs).toBe(5_000);
+  expect(cfg.bleSendTimeoutMs).toBe(70_000);
   expect(cfg.nameTemplate).toBe("godox-{shortAddr}");
   expect(cfg.enableColor).toBe(true);
   expect(cfg.fxPresets).toEqual([]);
@@ -74,6 +77,24 @@ test("resolveConfig normalizes effect and RGBW presets", () => {
 test("resolveConfig clamps scanIntervalSeconds to a sane minimum", () => {
   expect(resolveConfig({ scanIntervalSeconds: 1 }).scanIntervalSeconds).toBe(10);
   expect(resolveConfig({ scanIntervalSeconds: 120 }).scanIntervalSeconds).toBe(120);
+});
+
+test("resolveConfig clamps BLE send timeouts and derives the default full-send budget", () => {
+  expect(
+    resolveConfig({
+      bleFindTimeoutMs: 2_000,
+      bleWriteTimeoutMs: 1_000,
+    }).bleSendTimeoutMs,
+  ).toBe(48_000);
+
+  const cfg = resolveConfig({
+    bleFindTimeoutMs: 500,
+    bleWriteTimeoutMs: 80,
+    bleSendTimeoutMs: 1_000,
+  });
+  expect(cfg.bleFindTimeoutMs).toBe(1_000);
+  expect(cfg.bleWriteTimeoutMs).toBe(100);
+  expect(cfg.bleSendTimeoutMs).toBe(5_000);
 });
 
 test("resolveConfig keeps manual lights with required fields", () => {
