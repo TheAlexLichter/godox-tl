@@ -270,6 +270,13 @@ test.each([
   { ivIndex: -1 },
   { nodeAddress: 0 },
   { provisionerAddress: 0x8000 },
+  ...["networkKey", "appKey", "deviceKey"].flatMap((field) =>
+    ["a".repeat(16), Array.from({ length: 16 }, () => 0xab), null, new Uint16Array(16)].map(
+      (value) => ({ [field]: value }),
+    ),
+  ),
+  { deviceAddress: null },
+  { sequenceDirectory: null },
 ])(
   "saveMeshState rejects invalid runtime state before replacing the file (%j)",
   async (invalid) => {
@@ -280,5 +287,44 @@ test.each([
       await Effect.runPromise(Effect.flip(saveMeshState(path, { ...sample, ...invalid }))),
     ).toBeInstanceOf(MeshStateError);
     expect(await readFile(path, "utf8")).toBe(before);
+  },
+);
+
+test.each(["networkKey", "appKey", "deviceKey"])(
+  "saveMeshState does not retain invalid runtime %s material in errors",
+  async (field) => {
+    const path = join(dir, "private-save.json");
+    const secret = "secret-key-value-12345678901234567";
+    const error = await Effect.runPromise(
+      Effect.flip(saveMeshState(path, { ...sample, [field]: secret })),
+    );
+    expect(error).toBeInstanceOf(MeshStateError);
+    expect(error.message).toContain(field);
+    expect(
+      `${error.message}\n${inspect(error, { depth: 20 })}\n${JSON.stringify(error)}`,
+    ).not.toContain(secret);
+  },
+);
+
+test.each([undefined, ""])(
+  "saveMeshState accepts Buffer keys and optional strings (%j)",
+  async (optional) => {
+    const path = join(dir, "optional.json");
+    await Effect.runPromise(
+      saveMeshState(path, {
+        ...sample,
+        networkKey: Buffer.from(sample.networkKey),
+        appKey: Buffer.from(sample.appKey),
+        deviceKey: Buffer.from(sample.deviceKey),
+        deviceAddress: optional,
+        sequenceDirectory: optional,
+      }),
+    );
+    const loaded = await Effect.runPromise(loadMeshState(path));
+    expect(loaded.networkKey).toEqual(sample.networkKey);
+    expect(loaded.appKey).toEqual(sample.appKey);
+    expect(loaded.deviceKey).toEqual(sample.deviceKey);
+    expect(loaded.deviceAddress).toBe("");
+    expect(loaded.sequenceDirectory).toBe(optional);
   },
 );

@@ -57,6 +57,22 @@ type RawMeshState = typeof RawMeshStateSchema.Type;
 const MeshStateJson = Schema.fromJsonString(RawMeshStateSchema, { space: 2 });
 const decodeState = Schema.decodeUnknownSync(MeshStateJson, { errors: "all", reportInput: false });
 const encodeState = Schema.encodeSync(MeshStateJson);
+const KeyBytes = Schema.Uint8Array.check(Schema.isBetweenLength(16, 16));
+const MeshStateInputSchema = Schema.Struct({
+  networkKey: KeyBytes,
+  appKey: KeyBytes,
+  deviceKey: KeyBytes,
+  ivIndex: RawMeshStateSchema.fields.iv_index,
+  provisionerAddress: UnicastAddress,
+  nodeAddress: UnicastAddress,
+  sequenceNumber: RawMeshStateSchema.fields.sequence_number,
+  deviceAddress: Schema.optional(Schema.String),
+  sequenceDirectory: Schema.optional(Schema.String),
+});
+const validateStateInput = Schema.decodeUnknownSync(MeshStateInputSchema, {
+  errors: "all",
+  reportInput: false,
+});
 
 // Never attach the original schema issue: JSON/parser diagnostics can contain
 // secret key material even when input reporting is disabled.
@@ -118,7 +134,7 @@ export const saveMeshState = (
 ): Effect.Effect<void, MeshStateError> =>
   Effect.tryPromise({
     try: async () => {
-      const text = encodeState(toRaw(state));
+      const text = encodeState(toRaw(validateStateInput(state)));
       await mkdir(dirname(path), { recursive: true });
       const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`;
       await writeFile(tmp, `${text}\n`, "utf8");
