@@ -18,6 +18,11 @@
         "description": "Path to the godox-tl registry JSON. Leave empty to store registry and state files under the Homebridge storage directory. Set this to a CLI registry path only when the Homebridge user can read and write the registry and state files.",
         "type": "string"
       },
+      "sequenceDirectory": {
+        "title": "Mesh sequence directory",
+        "description": "Shared writable directory for mesh counters. Defaults to sequences/ next to the registry. Existing light states keep their previously selected directory.",
+        "type": "string"
+      },
       "discoveryMode": {
         "title": "Discovery mode",
         "type": "string",

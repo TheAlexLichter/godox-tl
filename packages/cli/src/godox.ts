@@ -6,7 +6,6 @@ import {
   defaultStatesDir,
   Domain,
   getLight,
-  LightController,
   LightNotFoundError,
   listLights,
   loadRegistry,
@@ -28,8 +27,16 @@ import packageJson from "../package.json" with { type: "json" };
 
 const { Cct, Fx, Hsi, Off, Rgbw, byte, hue, kelvin, pct, sat } = Domain;
 
-const controllerFor = (entry: { address: string; statePath: string }): LightController["Type"] =>
-  makeMeshController({ address: entry.address, statePath: entry.statePath });
+const controllerFor = (entry: { address: string; statePath: string }) =>
+  listLights().pipe(
+    Effect.map((entries) =>
+      makeMeshController({
+        address: entry.address,
+        statePath: entry.statePath,
+        statePaths: entries.map((light) => light.statePath),
+      }),
+    ),
+  );
 
 const scanCmd = Command.make(
   "scan",
@@ -76,7 +83,10 @@ const provisionCmd = Command.make(
       Effect.gen(function* () {
         const statePath = join(defaultStatesDir(), `${name}.json`);
         console.log(`Provisioning ${address}...`);
-        const result = yield* provisionAndRebind(address, { statePath });
+        const result = yield* provisionAndRebind(address, {
+          statePath,
+          statePaths: (yield* listLights()).map((light) => light.statePath),
+        });
         const entry = yield* register({
           name,
           address,
@@ -102,10 +112,14 @@ const rebindCmd = Command.make("rebind", { name: Args.text({ name: "light" }) },
         provisionerAddress: state.provisionerAddress,
         nodeAddress: state.nodeAddress,
         sequenceNumber: state.sequenceNumber,
+        sequenceDirectory: state.sequenceDirectory,
+        statePath: entry.statePath,
+        statePaths: (yield* listLights()).map((light) => light.statePath),
       });
       yield* saveMeshState(entry.statePath, {
         ...state,
         sequenceNumber: result.sequenceNumber,
+        sequenceDirectory: result.sequenceDirectory,
       });
       console.log(`Rebound ${entry.name}`);
     }),
@@ -122,7 +136,7 @@ const setCmd = Command.make(
   ({ name, brightness, cct }) =>
     Effect.gen(function* () {
       const entry = yield* getLight(name);
-      const light = controllerFor(entry);
+      const light = yield* controllerFor(entry);
       yield* light.send(Cct.make({ brightness: pct(brightness), temperature: kelvin(cct) }));
     }),
 );
@@ -138,7 +152,7 @@ const hsiCmd = Command.make(
   ({ name, brightness, hue: hueValue, saturation }) =>
     Effect.gen(function* () {
       const entry = yield* getLight(name);
-      const light = controllerFor(entry);
+      const light = yield* controllerFor(entry);
       yield* light.send(
         Hsi.make({
           brightness: pct(brightness),
@@ -162,7 +176,7 @@ const rgbwCmd = Command.make(
   ({ name, brightness, red, green, blue, white }) =>
     Effect.gen(function* () {
       const entry = yield* getLight(name);
-      const light = controllerFor(entry);
+      const light = yield* controllerFor(entry);
       yield* light.send(
         Rgbw.make({
           brightness: pct(brightness),
@@ -187,7 +201,7 @@ const fxCmd = Command.make(
   ({ name, brightness, effect, level, filter }) =>
     Effect.gen(function* () {
       const entry = yield* getLight(name);
-      const light = controllerFor(entry);
+      const light = yield* controllerFor(entry);
       yield* light.send(
         Fx.make({
           brightness: pct(brightness),
@@ -202,7 +216,7 @@ const fxCmd = Command.make(
 const offCmd = Command.make("off", { name: Args.text({ name: "light" }) }, ({ name }) =>
   Effect.gen(function* () {
     const entry = yield* getLight(name);
-    const light = controllerFor(entry);
+    const light = yield* controllerFor(entry);
     yield* light.send(Off.make({}));
   }),
 );

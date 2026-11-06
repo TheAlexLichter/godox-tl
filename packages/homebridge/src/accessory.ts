@@ -73,6 +73,8 @@ export interface HomeKitFeatureConfig {
   readonly fxPresets: ReadonlyArray<FxPreset>;
   readonly rgbwPresets: ReadonlyArray<RgbwPreset>;
   readonly mesh?: {
+    readonly sequenceDirectory?: string;
+    readonly statePaths?: ReadonlyArray<string>;
     readonly findPeripheralTimeoutMs?: number;
     readonly proxyAddresses?: ReadonlyArray<string>;
     readonly sendTimeoutMs?: number;

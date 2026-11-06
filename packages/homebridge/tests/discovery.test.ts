@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { LightEntry } from "@godox-tl/core";
 import { Effect, Exit } from "effect";
 import { afterEach, beforeEach, expect, test } from "vite-plus/test";
@@ -66,6 +66,7 @@ class FailingScanNoble extends EventEmitter implements NobleLike {
 
 const config = (registryPath: string): ResolvedConfig => ({
   registryPath,
+  sequenceDirectory: join(dirname(registryPath), "sequences"),
   discoveryMode: "merge",
   autoProvision: true,
   startupScan: true,

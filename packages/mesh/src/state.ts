@@ -16,6 +16,8 @@ export interface MeshState {
   readonly sequenceNumber: number;
   /** Optional BLE address captured during provisioning or recovery. */
   readonly deviceAddress?: string;
+  /** Shared mesh/source sequence store. Persisted so CLI and Homebridge agree. */
+  readonly sequenceDirectory?: string;
 }
 
 export class MeshStateError extends Data.TaggedError("MeshStateError")<{
@@ -52,6 +54,7 @@ interface RawMeshState {
   readonly node_address: number;
   readonly provisioner_address: number;
   readonly sequence_number: number;
+  readonly sequence_directory?: string;
 }
 
 const fromRaw = (raw: RawMeshState): MeshState => ({
@@ -63,6 +66,7 @@ const fromRaw = (raw: RawMeshState): MeshState => ({
   nodeAddress: raw.node_address,
   sequenceNumber: raw.sequence_number,
   deviceAddress: raw.device_address ?? undefined,
+  sequenceDirectory: raw.sequence_directory,
 });
 
 const toRaw = (s: MeshState): RawMeshState => ({
@@ -74,6 +78,7 @@ const toRaw = (s: MeshState): RawMeshState => ({
   node_address: s.nodeAddress,
   provisioner_address: s.provisionerAddress,
   sequence_number: s.sequenceNumber,
+  ...(s.sequenceDirectory ? { sequence_directory: s.sequenceDirectory } : {}),
 });
 
 export const loadMeshState = (path: string): Effect.Effect<MeshState, MeshStateError> =>

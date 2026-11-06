@@ -44,6 +44,7 @@ const sampleState = (sequenceNumber: number): MeshState => ({
   provisionerAddress: 1,
   nodeAddress: 2,
   sequenceNumber,
+  sequenceDirectory: join(dir, "sequences"),
 });
 
 class FakeCharacteristic extends EventEmitter {

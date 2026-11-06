@@ -17,12 +17,13 @@ import {
   VENDOR_OPCODE,
 } from "./godox/protocol.ts";
 import { encodeGodoxFrame } from "./pdu/accessFrame.ts";
-import { loadMeshState, type MeshState, saveMeshState } from "./state.ts";
+import { loadMeshState } from "./state.ts";
+import { withMeshSequenceReservation, type SequenceOptions } from "./sequences.ts";
 
-export interface MeshControllerOptions {
+export interface MeshControllerOptions extends SequenceOptions {
   /** BLE address (CoreBluetooth UUID on macOS, MAC on Linux). */
   readonly address: string;
-  /** Path to the mesh state JSON. Read on construction; written after every successful send. */
+  /** Path to the mesh state JSON. Read per command; counter hints are persisted before sending. */
   readonly statePath: string;
   /** When true, encode the frame but don't open a BLE connection. */
   readonly dryRun?: boolean;
@@ -75,17 +76,6 @@ const buildPayload = (
     }),
   );
 
-const stateMutexes = new Map<string, ReturnType<typeof Effect.unsafeMakeSemaphore>>();
-
-const mutexForStatePath = (statePath: string): ReturnType<typeof Effect.unsafeMakeSemaphore> => {
-  let mutex = stateMutexes.get(statePath);
-  if (!mutex) {
-    mutex = Effect.unsafeMakeSemaphore(1);
-    stateMutexes.set(statePath, mutex);
-  }
-  return mutex;
-};
-
 interface SendWaiter {
   readonly resolve: () => void;
   readonly reject: (error: unknown) => void;
@@ -126,7 +116,6 @@ export const makeMeshController = (options: MeshControllerOptions): LightControl
     1,
     options.sendTimeoutMs ?? findPeripheralTimeoutMs + writeTimeoutMs + 45_000,
   );
-  const stateMutex = mutexForStatePath(options.statePath);
 
   let writer: ProxyWriterConnection | undefined;
   let idleTimer: NodeJS.Timeout | undefined;
@@ -317,68 +306,47 @@ export const makeMeshController = (options: MeshControllerOptions): LightControl
             ? [payload]
             : [encodeOn(), encodeOn(), payload];
 
-      const proxyPdus = yield* Effect.gen(function* () {
-        const state: MeshState = yield* loadMeshState(options.statePath).pipe(
-          Effect.mapError(
-            (e) =>
-              new TransportError({
-                cause: e,
-                message: `loadMeshState(${options.statePath}) failed: ${e.message}`,
-              }),
-          ),
-        );
-
-        const pdus = payloads.map((godoxV2Payload, index) =>
-          encodeGodoxFrame({
-            netKey: state.networkKey,
-            appKey: state.appKey,
-            src: state.provisionerAddress,
-            dst: state.nodeAddress,
-            seq: state.sequenceNumber + index,
-            ivIndex: state.ivIndex,
-            vendorOpcode: VENDOR_OPCODE,
-            godoxV2Payload,
-          }),
-        );
-
-        const nextState: MeshState = {
-          ...state,
-          sequenceNumber: state.sequenceNumber + pdus.length,
-        };
-        yield* saveMeshState(options.statePath, nextState).pipe(
-          Effect.mapError(
-            (e) =>
-              new TransportError({
-                cause: e,
-                message: `saveMeshState(${options.statePath}) failed: ${e.message}`,
-              }),
-          ),
-        );
-
-        if (options.dryRun) {
-          for (const [index, pdu] of pdus.entries()) {
-            yield* Effect.logInfo(
-              `[mesh dry-run] addr=${options.address} seq=${state.sequenceNumber + index} pdu=${Array.from(
-                pdu,
-                (b) => b.toString(16).padStart(2, "0"),
-              ).join("")}`,
-            );
+      const state = yield* loadMeshState(options.statePath).pipe(
+        Effect.mapError((cause) => transportError(options.address, cause)),
+      );
+      yield* withMeshSequenceReservation(state, payloads.length, options, (reservation) =>
+        Effect.gen(function* () {
+          const proxyPdus = payloads.map((godoxV2Payload, index) =>
+            encodeGodoxFrame({
+              netKey: state.networkKey,
+              appKey: state.appKey,
+              src: state.provisionerAddress,
+              dst: state.nodeAddress,
+              seq: reservation.sequenceNumber + index,
+              ivIndex: state.ivIndex,
+              vendorOpcode: VENDOR_OPCODE,
+              godoxV2Payload,
+            }),
+          );
+          if (options.dryRun) {
+            for (const [index, pdu] of proxyPdus.entries())
+              yield* Effect.logInfo(
+                `[mesh dry-run] addr=${options.address} seq=${reservation.sequenceNumber + index} pdu=${Array.from(pdu, (b) => b.toString(16).padStart(2, "0")).join("")}`,
+              );
+          } else if (conn) {
+            yield* Effect.logDebug(`[mesh] sending ${cmd._tag} to ${options.address}`);
+            yield* writePdus(conn, proxyPdus);
+            const runtime = yield* Effect.runtime<never>();
+            yield* Effect.sync(() => {
+              powerState = cmd._tag === "Off" ? "off" : "on";
+              // Closing an uncached writer resets power state, so update it first.
+              scheduleIdleClose(runtime);
+            });
+            yield* Effect.logDebug(`[mesh] sent ${cmd._tag} to ${options.address}`);
           }
-        }
-        return pdus;
-      }).pipe(stateMutex.withPermits(1));
-
-      if (conn) {
-        yield* Effect.logDebug(`[mesh] sending ${cmd._tag} to ${options.address}`);
-        yield* writePdus(conn, proxyPdus);
-        const runtime = yield* Effect.runtime<never>();
-        yield* Effect.sync(() => {
-          powerState = cmd._tag === "Off" ? "off" : "on";
-          // Closing an uncached writer resets power state, so update it first.
-          scheduleIdleClose(runtime);
-        });
-        yield* Effect.logDebug(`[mesh] sent ${cmd._tag} to ${options.address}`);
-      }
+        }),
+      ).pipe(
+        Effect.mapError((cause) =>
+          cause instanceof TransportError || cause instanceof TransportUnsupportedError
+            ? cause
+            : transportError(options.address, cause),
+        ),
+      );
     });
 
   const settle = (waiters: ReadonlyArray<SendWaiter>, error?: unknown): void => {

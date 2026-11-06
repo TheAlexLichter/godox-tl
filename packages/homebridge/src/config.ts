@@ -24,6 +24,7 @@ export interface RgbwPresetConfig {
 export interface PluginConfig {
   readonly name?: string;
   readonly registryPath?: string;
+  readonly sequenceDirectory?: string;
   readonly discoveryMode?: DiscoveryMode;
   readonly autoProvision?: boolean;
   readonly startupScan?: boolean;
@@ -60,6 +61,7 @@ export interface RgbwPreset {
 
 export interface ResolvedConfig {
   readonly registryPath: string;
+  readonly sequenceDirectory: string;
   readonly discoveryMode: DiscoveryMode;
   readonly autoProvision: boolean;
   readonly startupScan: boolean;
@@ -158,8 +160,10 @@ export const resolveConfig = (
     DEFAULT_BLE_WRITE_TIMEOUT_MS,
   );
 
+  const registryPath = raw.registryPath || options.defaultRegistryPath || defaultCoreRegistryPath();
   return {
-    registryPath: raw.registryPath || options.defaultRegistryPath || defaultCoreRegistryPath(),
+    registryPath,
+    sequenceDirectory: raw.sequenceDirectory || join(dirname(registryPath), "sequences"),
     discoveryMode: raw.discoveryMode ?? "merge",
     autoProvision: raw.autoProvision ?? false,
     startupScan: raw.startupScan ?? true,

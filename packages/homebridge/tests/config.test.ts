@@ -28,6 +28,7 @@ test("resolveConfig uses the provided Homebridge registry default", () => {
     { defaultRegistryPath: "/var/lib/homebridge/godox-tl/registry.json" },
   );
   expect(cfg.registryPath).toBe("/var/lib/homebridge/godox-tl/registry.json");
+  expect(cfg.sequenceDirectory).toBe("/var/lib/homebridge/godox-tl/sequences");
 });
 
 test("resolveConfig keeps explicit registryPath for shared CLI registries", () => {
@@ -123,4 +124,10 @@ test("shortAddr drops separators and lowercases", () => {
 test("expandName fills the shortAddr placeholder", () => {
   expect(expandName("godox-{shortAddr}", "AA:BB:CC:11:22:33")).toBe("godox-112233");
   expect(expandName("light", "AA:BB:CC:11:22:33")).toBe("light");
+});
+
+test("resolveConfig accepts a shared sequence directory", () => {
+  expect(resolveConfig({ sequenceDirectory: "/shared/godox-counters" }).sequenceDirectory).toBe(
+    "/shared/godox-counters",
+  );
 });

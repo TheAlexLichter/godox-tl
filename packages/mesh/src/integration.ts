@@ -4,9 +4,10 @@
 import { Effect } from "effect";
 import { provisionLight, type ProvisioningResult } from "./provisioning/index.ts";
 import { rebindNode } from "./config/index.ts";
+import type { SequenceOptions } from "./sequences.ts";
 import { saveMeshState, type MeshState } from "./state.ts";
 
-export interface ProvisionAndRebindOptions {
+export interface ProvisionAndRebindOptions extends SequenceOptions {
   /** Persist the final mesh state to this path when both steps succeed. Optional. */
   readonly statePath?: string;
   readonly networkKey?: Uint8Array;
@@ -52,6 +53,7 @@ export const provisionAndRebind = (address: string, options: ProvisionAndRebindO
       nodeAddress: provisioning.nodeAddress,
       sequenceNumber: provisioning.sequenceNumber,
       deviceAddress: address,
+      sequenceDirectory: options.sequenceDirectory,
     };
     if (options.statePath) {
       yield* saveMeshState(options.statePath, preRebind);
@@ -64,6 +66,7 @@ export const provisionAndRebind = (address: string, options: ProvisionAndRebindO
 
     const rebind = yield* Effect.scoped(
       rebindNode(address, {
+        ...options,
         networkKey: provisioning.networkKey,
         appKey: provisioning.appKey,
         deviceKey: provisioning.deviceKey,
@@ -74,7 +77,11 @@ export const provisionAndRebind = (address: string, options: ProvisionAndRebindO
       }),
     );
 
-    const state: MeshState = { ...preRebind, sequenceNumber: rebind.sequenceNumber };
+    const state: MeshState = {
+      ...preRebind,
+      sequenceNumber: rebind.sequenceNumber,
+      sequenceDirectory: rebind.sequenceDirectory,
+    };
 
     if (options.statePath) {
       yield* saveMeshState(options.statePath, state);

@@ -7,8 +7,11 @@
 //      ProxyConnection whose `write` synthesises the matching status frame
 //      and pushes it back through the notifications stream.
 
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Effect, Queue, Stream } from "effect";
-import { expect, test } from "vite-plus/test";
+import { afterEach, beforeEach, expect, test } from "vite-plus/test";
 import { aesCcmDecrypt, aesCcmEncrypt } from "../src/crypto/aes.ts";
 import { k2 } from "../src/crypto/kdf.ts";
 import { deviceNonce } from "../src/crypto/nonces.ts";
@@ -30,6 +33,16 @@ import {
 import { decodeUnsegmentedAccess, encodeUnsegmentedAccess } from "../src/pdu/lowerTransport.ts";
 import { decodeNetworkPdu, encodeNetworkPdu } from "../src/pdu/network.ts";
 import { decodeProxyPdu, encodeProxyPdu } from "../src/pdu/proxy.ts";
+import { reserveMeshSequences } from "../src/sequences.ts";
+import { loadMeshState, saveMeshState } from "../src/state.ts";
+
+let sequenceDirectory: string;
+beforeEach(async () => {
+  sequenceDirectory = await mkdtemp(join(tmpdir(), "godox-config-sequences-"));
+});
+afterEach(async () => {
+  await rm(sequenceDirectory, { recursive: true, force: true });
+});
 
 const hardwareAvailable = process.env.MESH_HARDWARE_AVAILABLE === "1";
 
@@ -328,6 +341,7 @@ test("rebindOverConnection: sends AppKey Add + Model App Bind and advances seq b
     });
 
     const result = yield* rebindOverConnection(conn, {
+      sequenceDirectory,
       networkKey: NETWORK_KEY,
       appKey: APP_KEY,
       deviceKey: DEVICE_KEY,
@@ -360,6 +374,7 @@ test("rebindOverConnection: sends AppKey Add + Model App Bind and advances seq b
 });
 
 test("rebindOverConnection: surfaces ConfigError stage=appKeyAdd when device returns non-zero status", async () => {
+  const statePath = join(sequenceDirectory, "state.json");
   const program = Effect.gen(function* () {
     const { conn } = yield* makeFakeConn({
       networkKey: NETWORK_KEY,
@@ -386,6 +401,8 @@ test("rebindOverConnection: surfaces ConfigError stage=appKeyAdd when device ret
     });
 
     return yield* rebindOverConnection(conn, {
+      sequenceDirectory,
+      statePath,
       networkKey: NETWORK_KEY,
       appKey: APP_KEY,
       deviceKey: DEVICE_KEY,
@@ -396,8 +413,29 @@ test("rebindOverConnection: surfaces ConfigError stage=appKeyAdd when device ret
     });
   });
 
+  await Effect.runPromise(
+    saveMeshState(statePath, {
+      networkKey: NETWORK_KEY,
+      appKey: APP_KEY,
+      deviceKey: DEVICE_KEY,
+      ivIndex: IV_INDEX,
+      provisionerAddress: PROVISIONER,
+      nodeAddress: NODE,
+      sequenceNumber: 0,
+      deviceAddress: "AA:BB:CC:DD:EE:FF",
+    }),
+  );
   const exit = await Effect.runPromiseExit(program);
   expect(exit._tag).toBe("Failure");
+  // Even an unsuccessful config exchange consumes both reserved sequences,
+  // and subsequent control uses the same source counter.
+  const saved = await Effect.runPromise(loadMeshState(statePath));
+  expect(saved.sequenceNumber).toBe(2);
+  expect(saved.deviceAddress).toBe("AA:BB:CC:DD:EE:FF");
+  const next = await Effect.runPromise(
+    reserveMeshSequences(saved, 1, { statePath, sequenceDirectory }),
+  );
+  expect(next.sequenceNumber).toBe(2);
   if (exit._tag === "Failure") {
     // Walk the cause to find the tagged error we expect.
     const failures: unknown[] = [];
