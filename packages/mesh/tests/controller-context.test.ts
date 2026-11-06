@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Domain } from "@godox-tl/core";
 import { Effect, Logger, LogLevel } from "effect";
-import { afterEach, beforeEach, expect, test } from "vite-plus/test";
+import { afterEach, beforeEach, expect, test, vi } from "vite-plus/test";
 import { __setNobleForTesting, MESH_PROXY_SERVICE_UUID } from "../src/ble/index.ts";
 import type { NobleLike } from "../src/ble/noble.ts";
 import { makeMeshController } from "../src/controller.ts";
@@ -21,7 +21,10 @@ afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
-const setupController = async (coalesce: boolean) => {
+const setupController = async (
+  coalesce: boolean,
+  options: { readonly idleMs?: number; readonly disconnect?: () => Promise<void> } = {},
+) => {
   const statePath = join(dir, "state.json");
   await Effect.runPromise(
     saveMeshState(statePath, {
@@ -51,8 +54,9 @@ const setupController = async (coalesce: boolean) => {
       queueMicrotask(() =>
         this.emit("discover", {
           address: "AA:BB:CC:DD:EE:FF",
+          state: "connected",
           connectAsync: async () => {},
-          disconnectAsync: async () => {},
+          disconnectAsync: options.disconnect ?? (async () => {}),
           discoverServicesAsync: async () => [
             {
               uuid: MESH_PROXY_SERVICE_UUID,
@@ -84,7 +88,7 @@ const setupController = async (coalesce: boolean) => {
       address: "AA:BB:CC:DD:EE:FF",
       statePath,
       coalesce,
-      connectionIdleMs: 10_000,
+      connectionIdleMs: options.idleMs ?? 10_000,
     }),
     firstWriteStarted,
     releaseFirstWrite: () => releaseFirstWrite?.(),
@@ -150,4 +154,24 @@ test("coalesced work uses the newest command's runtime, while settling supersede
   expect(firstMessages.filter((message) => message.includes("[mesh] sent Cct"))).toHaveLength(1);
   expect(supersededMessages).toEqual([]);
   expect(newestMessages.filter((message) => message.includes("[mesh] sent Cct"))).toHaveLength(1);
+});
+
+test("idle writer cleanup retains the caller's logger for disconnect failures", async () => {
+  const { controller, firstWriteStarted, releaseFirstWrite } = await setupController(false, {
+    idleMs: 5,
+    disconnect: async () => {
+      throw new Error("disconnect refused");
+    },
+  });
+  const messages: string[] = [];
+  const sending = runWithLogger(controller, 30, messages);
+  await firstWriteStarted;
+  releaseFirstWrite();
+  await sending;
+
+  await vi.waitFor(() => {
+    expect(
+      messages.filter((message) => message.includes("Failed to close BLE connection")),
+    ).toHaveLength(2);
+  });
 });
