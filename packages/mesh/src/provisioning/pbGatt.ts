@@ -14,8 +14,7 @@
 // payloads. Frames with the wrong message type are ignored — the device
 // occasionally interleaves other proxy traffic on a hybrid bearer, though
 // in practice during provisioning we only ever see type=0x03.
-
-import { Chunk, Effect, Stream } from "effect";
+import { Filter, Option, Chunk, Effect, Stream } from "effect";
 import { ProvisioningError } from "./errors.ts";
 
 const PROVISIONING_MESSAGE_TYPE = 0x03;
@@ -104,44 +103,48 @@ export const decodeProvisioningPdu = <E>(
   Effect.gen(function* () {
     const segments: Uint8Array[] = [];
     let sawFirst = false;
-
-    const exit: Uint8Array | undefined = yield* Stream.runFoldWhile(
-      stream,
-      undefined as Uint8Array | undefined,
-      (acc) => acc === undefined,
-      (_acc, frame) => {
-        if (frame.length < 1) return undefined; // ignore empty
-        const head = frame[0]!;
-        const messageType = head & 0x3f;
-        if (messageType !== PROVISIONING_MESSAGE_TYPE) return undefined;
-        const sar = (head >>> 6) & 0x03;
-        const payload = frame.subarray(1);
-        if (sar === SAR_COMPLETE) {
-          // A complete PDU in one frame — but discard anything we'd been
-          // half-collecting (out-of-order frame; protocol restart).
-          segments.length = 0;
-          sawFirst = false;
-          return new Uint8Array(payload);
-        }
-        if (sar === SAR_FIRST) {
-          segments.length = 0;
-          segments.push(new Uint8Array(payload));
-          sawFirst = true;
-          return undefined;
-        }
-        if (sar === SAR_CONTINUATION) {
-          if (!sawFirst) return undefined; // stray continuation, drop
-          segments.push(new Uint8Array(payload));
-          return undefined;
-        }
-        // SAR_LAST
-        if (!sawFirst) return undefined; // stray last segment, drop
-        segments.push(new Uint8Array(payload));
-        const merged = concat(segments);
+    const assemble = (frame: Uint8Array): Uint8Array | undefined => {
+      if (frame.length < 1) return undefined; // ignore empty
+      const head = frame[0]!;
+      const messageType = head & 0x3f;
+      if (messageType !== PROVISIONING_MESSAGE_TYPE) return undefined;
+      const sar = (head >>> 6) & 0x03;
+      const payload = frame.subarray(1);
+      if (sar === SAR_COMPLETE) {
+        // A complete PDU in one frame — but discard anything we'd been
+        // half-collecting (out-of-order frame; protocol restart).
         segments.length = 0;
         sawFirst = false;
-        return merged;
-      },
+        return new Uint8Array(payload);
+      }
+      if (sar === SAR_FIRST) {
+        segments.length = 0;
+        segments.push(new Uint8Array(payload));
+        sawFirst = true;
+        return undefined;
+      }
+      if (sar === SAR_CONTINUATION) {
+        if (!sawFirst) return undefined; // stray continuation, drop
+        segments.push(new Uint8Array(payload));
+        return undefined;
+      }
+      // SAR_LAST
+      if (!sawFirst) return undefined; // stray last segment, drop
+      segments.push(new Uint8Array(payload));
+      const merged = concat(segments);
+      segments.length = 0;
+      sawFirst = false;
+      return merged;
+    };
+    const exit = yield* stream.pipe(
+      Stream.filterMap(
+        Filter.fromPredicateOption((frame) => {
+          const pdu = assemble(frame);
+          return pdu === undefined ? Option.none() : Option.some(pdu);
+        }),
+      ),
+      Stream.runHead,
+      Effect.map(Option.getOrUndefined),
     );
 
     if (exit === undefined) {

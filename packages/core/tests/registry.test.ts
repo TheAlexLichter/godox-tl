@@ -68,7 +68,7 @@ test("listLights returns all registered entries", async () => {
 test("getLight fails with LightNotFoundError for unknown name", async () => {
   const exit = await Effect.runPromiseExit(getLight("ghost", path));
   if (!Exit.isFailure(exit)) throw new Error("expected failure");
-  const failure = Cause.failureOption(exit.cause);
+  const failure = Cause.findErrorOption(exit.cause);
   expect(Option.isSome(failure)).toBe(true);
   if (!Option.isSome(failure)) return;
   expect(failure.value._tag).toBe("LightNotFoundError");

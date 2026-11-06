@@ -33,6 +33,6 @@
     "@noble/ciphers": "^2.2.0",
     "@noble/curves": "^2.2.0",
     "@stoprocent/noble": "^2.5.3",
-    "effect": "^3.21.2"
+    "effect": "~4.1.2"
   }
 }

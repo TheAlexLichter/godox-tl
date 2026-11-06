@@ -10,7 +10,7 @@
 // `getNoble` is an Effect that lazy-loads the real module on first use and
 // caches the resulting handle. `__setNobleForTesting` overrides it.
 
-import { Effect } from "effect";
+import { Effect, Semaphore } from "effect";
 import { BleError } from "./errors.ts";
 
 /** Subset of noble's Peripheral surface we actually use. Mirrors the upstream
@@ -58,7 +58,7 @@ export interface NobleLike {
 
 let cached: NobleLike | undefined;
 let override: NobleLike | undefined;
-const nobleOperationMutex = Effect.unsafeMakeSemaphore(1);
+const nobleOperationMutex = Semaphore.makeUnsafe(1);
 const pendingScanCleanups = new WeakMap<NobleLike, Promise<void>>();
 const SCAN_SHUTDOWN_TIMEOUT_MS = 3_000;
 

@@ -52,7 +52,7 @@
   "dependencies": {
     "@godox-tl/core": "workspace:^",
     "@godox-tl/mesh": "workspace:^",
-    "effect": "^3.21.2"
+    "effect": "~4.1.2"
   },
   "devDependencies": {
     "homebridge": "^1.8.0 || ^2.0.0"

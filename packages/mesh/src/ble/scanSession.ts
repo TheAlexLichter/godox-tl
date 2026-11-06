@@ -40,7 +40,7 @@ export const withScanCleanup = <A, E, R>(
       ),
       // Do not proceed to connect if shutdown failed or still owns the adapter.
       // A rejected stop has settled, so a later operation may attempt recovery.
-      Effect.zipLeft(
+      Effect.tap(() =>
         Effect.suspend(() => (shutdownError ? Effect.fail(shutdownError) : ensureScanIdle(noble))),
       ),
     );

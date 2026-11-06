@@ -14,8 +14,7 @@
 // segmented response, an unrelated mesh broadcast, etc.) is silently
 // skipped on the notifications stream until either the expected opcode
 // arrives or the caller's timeout fires.
-
-import { Duration, Effect, Option, Stream } from "effect";
+import { Filter, Duration, Effect, Option, Stream } from "effect";
 import { k2 } from "../crypto/kdf.ts";
 import { deviceNonce } from "../crypto/nonces.ts";
 import type { ProxyConnection } from "../ble/types.ts";
@@ -25,9 +24,7 @@ import { decodeProxyPdu } from "../pdu/proxy.ts";
 import { decryptAccessPdu } from "../pdu/upperTransport.ts";
 import { ConfigError } from "./errors.ts";
 import { splitOpcode } from "./messages.ts";
-
 const DEFAULT_TIMEOUT_MS = 5_000;
-
 export interface AwaitConfigStatusOptions {
   readonly deviceKey: Uint8Array;
   readonly networkKey: Uint8Array;
@@ -134,18 +131,20 @@ export const awaitConfigStatus = (
           cause,
         }),
     ),
-    Stream.filterMap((buf) => {
-      const access = tryDecodeProxyNotification(buf, {
-        deviceKey: opts.deviceKey,
-        networkKey: opts.networkKey,
-        nodeAddress: opts.nodeAddress,
-        provisionerAddress: opts.provisionerAddress,
-        ivIndex: opts.ivIndex,
-      });
-      if (!access) return Option.none();
-      if (access.opcode !== expectedOpcode) return Option.none();
-      return Option.some(access);
-    }),
+    Stream.filterMap(
+      Filter.fromPredicateOption((buf) => {
+        const access = tryDecodeProxyNotification(buf, {
+          deviceKey: opts.deviceKey,
+          networkKey: opts.networkKey,
+          nodeAddress: opts.nodeAddress,
+          provisionerAddress: opts.provisionerAddress,
+          ivIndex: opts.ivIndex,
+        });
+        if (!access) return Option.none();
+        if (access.opcode !== expectedOpcode) return Option.none();
+        return Option.some(access);
+      }),
+    ),
   );
 
   return Stream.runHead(decoded).pipe(
@@ -159,13 +158,15 @@ export const awaitConfigStatus = (
             }),
           ),
     ),
-    Effect.timeoutFail({
+    Effect.timeoutOrElse({
       duration: Duration.millis(timeoutMs),
-      onTimeout: () =>
-        new ConfigError({
-          stage: "receive",
-          message: `timed out after ${timeoutMs}ms waiting for opcode 0x${expectedOpcode.toString(16)}`,
-        }),
+      orElse: () =>
+        Effect.fail(
+          new ConfigError({
+            stage: "receive",
+            message: `timed out after ${timeoutMs}ms waiting for opcode 0x${expectedOpcode.toString(16)}`,
+          }),
+        ),
     }),
     Effect.map((decoded) => {
       const params = decoded.parameters;

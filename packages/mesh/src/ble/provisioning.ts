@@ -9,7 +9,7 @@
 // else in common with each other once we're past discovery.
 
 import type { Characteristic, Peripheral } from "@stoprocent/noble";
-import { Effect, type Scope, Stream } from "effect";
+import { Queue, Effect, type Scope, Stream } from "effect";
 import { matchAddress } from "./address.ts";
 import { BleError } from "./errors.ts";
 import { getNoble, type NobleLike, type PeripheralLike, withNobleOperation } from "./noble.ts";
@@ -18,12 +18,10 @@ import type { ProxyConnection } from "./types.ts";
 
 const MESH_PROVISIONING_DATA_IN_UUID = "2adb"; // provisioner → device (writes)
 const MESH_PROVISIONING_DATA_OUT_UUID = "2adc"; // device → provisioner (notifications)
-
 const FIND_PERIPHERAL_TIMEOUT_MS = 25_000;
 const POWERED_ON_TIMEOUT_MS = 5_000;
-
 const waitPoweredOn = (noble: NobleLike): Effect.Effect<void, BleError> =>
-  Effect.async<void, BleError>((resume) => {
+  Effect.callback<void, BleError>((resume) => {
     if (noble.state === "poweredOn") {
       resume(Effect.void);
       return;
@@ -38,6 +36,7 @@ const waitPoweredOn = (noble: NobleLike): Effect.Effect<void, BleError> =>
         resume(Effect.void);
       }
     };
+
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;
@@ -54,7 +53,7 @@ const waitPoweredOn = (noble: NobleLike): Effect.Effect<void, BleError> =>
   });
 
 const findPeripheral = (noble: NobleLike, address: string): Effect.Effect<Peripheral, BleError> =>
-  Effect.async<Peripheral, BleError>((resume) => {
+  Effect.callback<Peripheral, BleError>((resume) => {
     let settled = false;
 
     const finish = (next: Effect.Effect<Peripheral, BleError>): void => {
@@ -98,10 +97,8 @@ const findPeripheral = (noble: NobleLike, address: string): Effect.Effect<Periph
         );
       });
   });
-
 const POST_CONNECT_SETTLE_MS = 3_000;
 const DISCOVER_TIMEOUT_MS = 15_000;
-
 // Telink-aware GATT discovery: the Telink chips in Godox Mesh lights need a
 // short settle window after the GATT connect before their server is
 // queryable, and they don't respond to the broad
@@ -111,7 +108,13 @@ const DISCOVER_TIMEOUT_MS = 15_000;
 // `discoverCharacteristicsAsync` works reliably.
 const discoverProvisioningCharacteristics = (
   peripheral: Peripheral,
-): Effect.Effect<{ readonly dataIn: Characteristic; readonly dataOut: Characteristic }, BleError> =>
+): Effect.Effect<
+  {
+    readonly dataIn: Characteristic;
+    readonly dataOut: Characteristic;
+  },
+  BleError
+> =>
   Effect.gen(function* () {
     yield* Effect.sleep(`${POST_CONNECT_SETTLE_MS} millis`);
     const services = yield* Effect.tryPromise({
@@ -122,12 +125,14 @@ const discoverProvisioningCharacteristics = (
           message: `discoverServicesAsync(['${MESH_PROVISIONING_SERVICE_UUID}']) failed`,
         }),
     }).pipe(
-      Effect.timeoutFail({
+      Effect.timeoutOrElse({
         duration: `${DISCOVER_TIMEOUT_MS} millis`,
-        onTimeout: () =>
-          new BleError({
-            message: `Mesh Provisioning service discovery hung past ${DISCOVER_TIMEOUT_MS / 1000}s`,
-          }),
+        orElse: () =>
+          Effect.fail(
+            new BleError({
+              message: `Mesh Provisioning service discovery hung past ${DISCOVER_TIMEOUT_MS / 1000}s`,
+            }),
+          ),
       }),
     );
     const service = services.find((s) => s.uuid.toLowerCase() === MESH_PROVISIONING_SERVICE_UUID);
@@ -146,9 +151,9 @@ const discoverProvisioningCharacteristics = (
         ]),
       catch: (cause) => new BleError({ cause, message: "discoverCharacteristicsAsync failed" }),
     }).pipe(
-      Effect.timeoutFail({
+      Effect.timeoutOrElse({
         duration: `${DISCOVER_TIMEOUT_MS} millis`,
-        onTimeout: () => new BleError({ message: "Characteristic discovery hung" }),
+        orElse: () => Effect.fail(new BleError({ message: "Characteristic discovery hung" })),
       }),
     );
     const dataIn = characteristics.find(
@@ -242,19 +247,23 @@ export const connectProvisioning = (
           }),
       );
       yield* Effect.logDebug(`[prov] subscribed; ready`);
-
-      const notifications: Stream.Stream<Uint8Array, BleError> = Stream.async<Uint8Array, BleError>(
-        (emit) => {
-          const handler = (buf: Uint8Array): void => {
-            void emit.single(buf);
-          };
-          listeners.add(handler);
-          return Effect.sync(() => {
-            listeners.delete(handler);
-          });
-        },
-      );
-
+      const notifications: Stream.Stream<Uint8Array, BleError> = Stream.callback<
+        Uint8Array,
+        BleError
+      >((emit) => {
+        const handler = (buf: Uint8Array): void => {
+          Queue.offerUnsafe(emit, buf);
+        };
+        return Effect.acquireRelease(
+          Effect.sync(() => {
+            listeners.add(handler);
+          }),
+          () =>
+            Effect.sync(() => {
+              listeners.delete(handler);
+            }),
+        );
+      });
       const supportsWithoutResponse = dataIn.properties.includes("writeWithoutResponse");
 
       const write = (pdu: Uint8Array): Effect.Effect<void, BleError> =>

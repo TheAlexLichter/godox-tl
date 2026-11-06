@@ -511,7 +511,13 @@ export const withMeshSequenceReservation = <A, E, R>(
       if (lease) await lease.release();
     });
     return Effect.scoped(
-      Effect.acquireReleaseInterruptible(acquire, () => release).pipe(Effect.flatMap(use)),
+      Effect.gen(function* () {
+        // Register before the interruptible acquisition: cancellation can leave
+        // the native Promise completing a write or holding a partial lock.
+        yield* Effect.addFinalizer(() => release);
+        const reservation = yield* acquire;
+        return yield* use(reservation);
+      }),
     );
   });
 

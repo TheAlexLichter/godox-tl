@@ -3,7 +3,7 @@
 // Mesh Proxy connection, and persists the bumped sequence number.
 
 import { Domain, LightController, TransportError, TransportUnsupportedError } from "@godox-tl/core";
-import { Duration, Effect, Exit, Match, Runtime } from "effect";
+import { Duration, Effect, Exit, Match, type Context } from "effect";
 import { connectProxyWriter } from "./ble/proxy.ts";
 import { BleError } from "./ble/errors.ts";
 import type { ProxyWriterConnection } from "./ble/types.ts";
@@ -84,7 +84,7 @@ interface SendWaiter {
 interface PendingSend {
   readonly cmd: Domain.LightCommand;
   readonly waiters: ReadonlyArray<SendWaiter>;
-  readonly runtime: Runtime.Runtime<never>;
+  readonly services: Context.Context<never>;
 }
 
 interface PendingWriterClose {
@@ -92,13 +92,17 @@ interface PendingWriterClose {
   readonly result: Promise<Exit.Exit<void, BleError>>;
   settled: boolean;
 }
-
 const WRITER_CLOSE_ATTEMPT_TIMEOUT_MS = 3_000;
-
 const transportError = (address: string, cause: unknown): TransportError =>
   new TransportError({
     cause,
-    message: `mesh send to ${address} failed: ${(cause as { readonly message?: string })?.message ?? String(cause)}`,
+    message: `mesh send to ${address} failed: ${
+      (
+        cause as {
+          readonly message?: string;
+        }
+      )?.message ?? String(cause)
+    }`,
   });
 
 /** Direct controller — `.send(cmd)` writes through a warm write-only proxy
@@ -106,7 +110,7 @@ const transportError = (address: string, cause: unknown): TransportError =>
  * is in-flight, later queued commands are collapsed to the newest value so
  * HomeKit slider drags don't force every intermediate value over BLE.
  */
-export const makeMeshController = (options: MeshControllerOptions): LightController["Type"] => {
+export const makeMeshController = (options: MeshControllerOptions): LightController["Service"] => {
   const persistent = options.persistentConnection ?? true;
   const coalesce = options.coalesce ?? persistent;
   const idleMs = Math.max(0, options.connectionIdleMs ?? 30_000);
@@ -163,20 +167,21 @@ export const makeMeshController = (options: MeshControllerOptions): LightControl
       powerConfidenceSource = undefined;
       powerConfidenceNextSequence = undefined;
       if (current) {
-        const runtime = yield* Effect.runtime<never>();
+        const services = yield* Effect.context<never>();
         const attempt = Effect.suspend(() => current.close()).pipe(
-          Effect.timeoutFail({
+          Effect.timeoutOrElse({
             duration: Duration.millis(WRITER_CLOSE_ATTEMPT_TIMEOUT_MS),
-            onTimeout: () => new BleError({ message: "BLE writer cleanup timed out after 3000ms" }),
+            orElse: () =>
+              Effect.fail(new BleError({ message: "BLE writer cleanup timed out after 3000ms" })),
           }),
         );
         // Cleanup outlives an interrupted waiter, but the fence keeps every
         // replacement connection behind both bounded close attempts.
         const cleanup: PendingWriterClose = {
           writer: current,
-          result: Runtime.runPromiseExit(runtime)(
+          result: Effect.runPromiseExitWith(services)(
             attempt.pipe(
-              Effect.catchAllCause(() => attempt),
+              Effect.catchCause(() => attempt),
               Effect.interruptible,
             ),
           ),
@@ -188,21 +193,20 @@ export const makeMeshController = (options: MeshControllerOptions): LightControl
           if (Exit.isSuccess(result) && closing === cleanup) closing = undefined;
         });
       }
-      yield* awaitWriterClose().pipe(Effect.catchAllCause(() => Effect.void));
+      yield* awaitWriterClose().pipe(Effect.catchCause(() => Effect.void));
     });
-
-  const scheduleIdleClose = (runtime: Runtime.Runtime<never>): void => {
+  const scheduleIdleClose = (services: Context.Context<never>): void => {
     clearIdleTimer();
     const scheduledWriter = writer;
     const closeScheduledWriter = Effect.suspend(() =>
       writer === scheduledWriter ? closeWriter() : Effect.void,
     );
     if (!persistent || idleMs === 0) {
-      void Runtime.runPromise(runtime)(closeScheduledWriter);
+      void Effect.runPromiseWith(services)(closeScheduledWriter);
       return;
     }
     idleTimer = setTimeout(() => {
-      void Runtime.runPromise(runtime)(closeScheduledWriter);
+      void Effect.runPromiseWith(services)(closeScheduledWriter);
     }, idleMs);
     idleTimer.unref?.();
   };
@@ -211,14 +215,14 @@ export const makeMeshController = (options: MeshControllerOptions): LightControl
     if (closing) {
       return awaitWriterClose().pipe(
         Effect.mapError((error) => transportError(options.address, error)),
-        Effect.zipRight(Effect.suspend(writerForSend)),
+        Effect.andThen(Effect.suspend(writerForSend)),
       );
     }
     if (writer && persistent) {
       if (writer.isConnected?.() === false) {
         return Effect.logDebug(`[mesh] discarding disconnected writer for ${options.address}`).pipe(
-          Effect.zipRight(closeWriter()),
-          Effect.zipRight(Effect.suspend(writerForSend)),
+          Effect.andThen(closeWriter()),
+          Effect.andThen(Effect.suspend(writerForSend)),
         );
       }
       return Effect.logDebug(`[mesh] reusing writer for ${options.address}`).pipe(
@@ -227,7 +231,7 @@ export const makeMeshController = (options: MeshControllerOptions): LightControl
     }
     const startedAt = Date.now();
     return Effect.logDebug(`[mesh] opening writer for ${options.address}`).pipe(
-      Effect.zipRight(
+      Effect.andThen(
         connectProxyWriter(options.address, {
           fallbackAddresses: options.proxyAddresses,
           findPeripheralTimeoutMs,
@@ -258,24 +262,26 @@ export const makeMeshController = (options: MeshControllerOptions): LightControl
       // handlers for this command join it, keeping cleanup grace bounded to 6s.
       const recoverPreviousClose = closing?.settled ? closeWriter(true) : Effect.void;
       return recoverPreviousClose.pipe(
-        Effect.zipRight(
+        Effect.andThen(
           sendNow(cmd).pipe(
-            Effect.catchAll((error) => {
+            Effect.catch((error) => {
               if (!(error instanceof TransportError) || !(error.cause instanceof BleError)) {
                 return Effect.fail(error);
               }
               return Effect.logDebug(
                 `[mesh] retrying ${cmd._tag} on a fresh writer for ${options.address}`,
-              ).pipe(Effect.zipRight(closeWriter()), Effect.zipRight(sendNow(cmd)));
+              ).pipe(Effect.andThen(closeWriter()), Effect.andThen(sendNow(cmd)));
             }),
           ),
         ),
-        Effect.timeoutFail({
+        Effect.timeoutOrElse({
           duration: Duration.millis(sendTimeoutMs),
-          onTimeout: () =>
-            transportError(
-              options.address,
-              new Error(`${cmd._tag} send timed out after ${sendTimeoutMs}ms`),
+          orElse: () =>
+            Effect.fail(
+              transportError(
+                options.address,
+                new Error(`${cmd._tag} send timed out after ${sendTimeoutMs}ms`),
+              ),
             ),
         }),
         Effect.tapError(() => closeWriter()),
@@ -292,12 +298,14 @@ export const makeMeshController = (options: MeshControllerOptions): LightControl
         yield* Effect.logDebug(`[mesh] writing ${proxyPdu.byteLength} bytes to ${options.address}`);
         yield* conn.write(proxyPdu).pipe(
           Effect.mapError((e) => transportError(options.address, e)),
-          Effect.timeoutFail({
+          Effect.timeoutOrElse({
             duration: Duration.millis(writeTimeoutMs),
-            onTimeout: () =>
-              transportError(
-                options.address,
-                new BleError({ message: `write timed out after ${writeTimeoutMs}ms` }),
+            orElse: () =>
+              Effect.fail(
+                transportError(
+                  options.address,
+                  new BleError({ message: `write timed out after ${writeTimeoutMs}ms` }),
+                ),
               ),
           }),
         );
@@ -363,13 +371,13 @@ export const makeMeshController = (options: MeshControllerOptions): LightControl
             } else if (conn) {
               yield* Effect.logDebug(`[mesh] sending ${cmd._tag} to ${options.address}`);
               yield* writePdus(conn, proxyPdus);
-              const runtime = yield* Effect.runtime<never>();
+              const services = yield* Effect.context<never>();
               yield* Effect.sync(() => {
                 powerState = cmd._tag === "Off" ? "off" : "on";
                 powerConfidenceSource = source;
                 powerConfidenceNextSequence = reservation.nextSequenceNumber;
                 // Closing an uncached writer resets power state, so update it first.
-                scheduleIdleClose(runtime);
+                scheduleIdleClose(services);
               });
               yield* Effect.logDebug(`[mesh] sent ${cmd._tag} to ${options.address}`);
             }
@@ -400,46 +408,45 @@ export const makeMeshController = (options: MeshControllerOptions): LightControl
   const runQueued = (
     cmd: Domain.LightCommand,
     waiters: ReadonlyArray<SendWaiter>,
-    runtime: Runtime.Runtime<never>,
+    services: Context.Context<never>,
   ): void => {
-    inFlight = Runtime.runPromise(runtime)(withSendTimeout(cmd))
+    inFlight = Effect.runPromiseWith(services)(withSendTimeout(cmd))
       .then(() => settle(waiters))
       .catch((error: unknown) => settle(waiters, error))
       .then(() => {
         const [next, ...rest] = pending;
         pending = rest;
         if (next) {
-          runQueued(next.cmd, next.waiters, next.runtime);
+          runQueued(next.cmd, next.waiters, next.services);
         } else {
           inFlight = undefined;
         }
       });
   };
-
-  const enqueue = (cmd: Domain.LightCommand, runtime: Runtime.Runtime<never>): Promise<void> =>
+  const enqueue = (cmd: Domain.LightCommand, services: Context.Context<never>): Promise<void> =>
     new Promise<void>((resolve, reject) => {
       const waiter = { resolve, reject };
       if (!inFlight) {
-        runQueued(cmd, [waiter], runtime);
+        runQueued(cmd, [waiter], services);
         return;
       }
       if (!coalesce) {
-        pending = [...pending, { cmd, waiters: [waiter], runtime }];
+        pending = [...pending, { cmd, waiters: [waiter], services }];
         return;
       }
       const waiters = pending.flatMap((send) => send.waiters);
-      // The newest command replaces the pending work, so its runtime owns the
+      // The newest command replaces the pending work, so its service context owns the
       // actual send; callers whose commands were superseded still settle with it.
-      pending = [{ cmd, waiters: [...waiters, waiter], runtime }];
+      pending = [{ cmd, waiters: [...waiters, waiter], services }];
     });
 
   return {
     send: (cmd) =>
       options.dryRun
         ? sendNow(cmd)
-        : Effect.flatMap(Effect.runtime<never>(), (runtime) =>
+        : Effect.flatMap(Effect.context<never>(), (services) =>
             Effect.tryPromise({
-              try: () => enqueue(cmd, runtime),
+              try: () => enqueue(cmd, services),
               catch: (cause) => cause as TransportError | TransportUnsupportedError,
             }),
           ),

@@ -10,7 +10,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Effect, Queue, Stream } from "effect";
+import { Cause, Effect, Queue, Stream } from "effect";
 import { afterEach, beforeEach, expect, test } from "vite-plus/test";
 import { aesCcmDecrypt, aesCcmEncrypt } from "../src/crypto/aes.ts";
 import { k2 } from "../src/crypto/kdf.ts";
@@ -437,25 +437,13 @@ test("rebindOverConnection: surfaces ConfigError stage=appKeyAdd when device ret
   );
   expect(next.sequenceNumber).toBe(2);
   if (exit._tag === "Failure") {
-    // Walk the cause to find the tagged error we expect.
-    const failures: unknown[] = [];
-    const collect = (c: unknown): void => {
-      if (!c || typeof c !== "object") return;
-      const obj = c as Record<string, unknown>;
-      if (obj._tag === "Fail") failures.push(obj.error);
-      if (obj._tag === "Sequential" || obj._tag === "Parallel") {
-        collect(obj.left);
-        collect(obj.right);
-      }
-      if (obj.cause) collect(obj.cause);
-    };
-    collect(exit.cause);
-    const err = failures.find((e) => (e as { _tag?: string })?._tag === "ConfigError") as
-      | { stage: string; status?: number; message: string }
-      | undefined;
-    expect(err).toBeDefined();
-    expect(err?.stage).toBe("appKeyAdd");
-    expect(err?.status).toBe(0x01);
+    const failure = Cause.findErrorOption(exit.cause);
+    const err = failure._tag === "Some" ? failure.value : undefined;
+    expect(err?._tag).toBe("ConfigError");
+    if (err?._tag === "ConfigError") {
+      expect(err.stage).toBe("appKeyAdd");
+      expect(err.status).toBe(0x01);
+    }
   }
 });
 

@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Domain } from "@godox-tl/core";
-import { Effect, Logger, LogLevel } from "effect";
+import { Effect, Logger, type LogLevel, References } from "effect";
 import { afterEach, beforeEach, expect, test, vi } from "vite-plus/test";
 import { __setNobleForTesting, MESH_PROXY_SERVICE_UUID } from "../src/ble/index.ts";
 import type { NobleLike } from "../src/ble/noble.ts";
@@ -100,7 +100,7 @@ const runWithLogger = (
   controller: ReturnType<typeof makeMeshController>,
   brightness: number,
   messages: string[],
-  level: LogLevel.LogLevel = LogLevel.Debug,
+  level: LogLevel.LogLevel = "Debug",
 ) =>
   Effect.runPromise(
     controller
@@ -111,12 +111,9 @@ const runWithLogger = (
         }),
       )
       .pipe(
-        Logger.withMinimumLogLevel(level),
+        Effect.provideService(References.MinimumLogLevel, level),
         Effect.provide(
-          Logger.replace(
-            Logger.defaultLogger,
-            Logger.make(({ message }) => messages.push(String(message))),
-          ),
+          Logger.layer([Logger.make(({ message }) => messages.push(String(message)))]),
         ),
       ),
   );
@@ -128,7 +125,7 @@ test("first and queued sends retain each caller's logger and minimum log level",
   const lastMessages: string[] = [];
   const first = runWithLogger(controller, 10, firstMessages);
   await firstWriteStarted;
-  const quiet = runWithLogger(controller, 20, quietMessages, LogLevel.Info);
+  const quiet = runWithLogger(controller, 20, quietMessages, "Info");
   const last = runWithLogger(controller, 30, lastMessages);
   releaseFirstWrite();
   await Promise.all([first, quiet, last]);

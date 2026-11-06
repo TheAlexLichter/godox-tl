@@ -1,7 +1,7 @@
 {
   "name": "@godox-tl/cli",
   "version": "1.0.5",
-  "description": "godox CLI binary built on @effect/cli — scan, provision, CCT, HSI, RGBW, FX, registry, and rebind commands.",
+  "description": "godox CLI binary built on Effect CLI — scan, provision, CCT, HSI, RGBW, FX, registry, and rebind commands.",
   "homepage": "https://github.com/TheAlexLichter/godox-tl#readme",
   "bugs": {
     "url": "https://github.com/TheAlexLichter/godox-tl/issues"
@@ -35,11 +35,9 @@
     "demo": "node src/demo.ts"
   },
   "dependencies": {
-    "@effect/cli": "^0.75.1",
-    "@effect/platform": "^0.96.1",
-    "@effect/platform-node": "^0.106.0",
+    "@effect/platform-node": "~4.1.2",
     "@godox-tl/core": "workspace:^",
     "@godox-tl/mesh": "workspace:^",
-    "effect": "^3.21.2"
+    "effect": "~4.1.2"
   }
 }

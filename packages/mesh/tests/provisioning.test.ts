@@ -2,7 +2,7 @@
 // integration is gated behind MESH_HARDWARE_AVAILABLE=1 so CI never tries
 // to drive a physical light.
 
-import { Chunk, Effect, Exit, Fiber, Stream } from "effect";
+import { Queue, Effect, Exit, Fiber, Stream } from "effect";
 import { expect, test } from "vite-plus/test";
 import { aesCcmDecrypt, aesCcmEncrypt } from "../src/crypto/aes.ts";
 import { cmac } from "../src/crypto/cmac.ts";
@@ -215,7 +215,7 @@ test("decodeProvisioningPdu: reassembles a multi-segment PDU", async () => {
   const frames = encodeProvisioningPdu(original, DEFAULT_PB_GATT_MTU);
   expect(frames.length).toBeGreaterThan(1);
 
-  const stream = Stream.fromChunk(Chunk.fromIterable(frames as ReadonlyArray<Uint8Array>));
+  const stream = Stream.fromArray(frames as ReadonlyArray<Uint8Array>);
   const decoded = await Effect.runPromise(decodeProvisioningPdu(stream, "invite"));
   expect(toHex(decoded)).toBe(toHex(original));
 });
@@ -224,13 +224,13 @@ test("decodeProvisioningPdu: ignores frames with the wrong message type", async 
   // SAR=0, MessageType=0 (Network PDU) — not a provisioning frame, must drop.
   const noise = Uint8Array.of(0x00, 0xde, 0xad, 0xbe, 0xef);
   const real = encodeProvisioningPdu(Uint8Array.of(PDU_COMPLETE))[0]!;
-  const stream = Stream.fromChunk(Chunk.fromIterable([noise, real]));
+  const stream = Stream.fromArray([noise, real]);
   const decoded = await Effect.runPromise(decodeProvisioningPdu(stream, "complete"));
   expect(toHex(decoded)).toBe(toHex(Uint8Array.of(PDU_COMPLETE)));
 });
 
 test("decodeProvisioningPdu: fails if the stream ends with no PDU", async () => {
-  const stream = Stream.fromChunk(Chunk.empty<Uint8Array>());
+  const stream = Stream.fromArray([] as Uint8Array[]);
   const exit = await Effect.runPromiseExit(decodeProvisioningPdu(stream, "capabilities"));
   expect(exit._tag).toBe("Failure");
 });
@@ -244,18 +244,21 @@ class FakeConnection {
   private resumeEmit: ((bytes: Uint8Array) => void) | undefined;
   private pending: Uint8Array[] = [];
 
-  readonly notifications: Stream.Stream<Uint8Array, BleError> = Stream.async<Uint8Array, BleError>(
-    (emit) => {
-      this.resumeEmit = (bytes) => {
-        void emit.single(bytes);
-      };
-      for (const b of this.pending) this.resumeEmit(b);
-      this.pending.length = 0;
-      return Effect.sync(() => {
+  readonly notifications: Stream.Stream<Uint8Array, BleError> = Stream.callback<
+    Uint8Array,
+    BleError
+  >((emit) => {
+    this.resumeEmit = (bytes) => {
+      Queue.offerUnsafe(emit, bytes);
+    };
+    for (const b of this.pending) this.resumeEmit(b);
+    this.pending.length = 0;
+    return Effect.addFinalizer(() =>
+      Effect.sync(() => {
         this.resumeEmit = undefined;
-      });
-    },
-  );
+      }),
+    );
+  });
 
   write = (pdu: Uint8Array): Effect.Effect<void, BleError> =>
     Effect.sync(() => {
@@ -303,7 +306,7 @@ test("runProvisioning: walks the full happy path in order against a fake bearer"
   // compute *after* observing the provisioner's writes.
 
   // The state machine subscribes to notifications fresh for each PDU
-  // read (each `runFoldWhile` opens its own subscription, and any
+  // read (each stream read opens its own subscription, and any
   // unconsumed emissions are discarded when the subscription ends).
   // So we deliver one response at a time, after each provisioner write.
 

@@ -215,7 +215,7 @@ const provisionCandidates = (
         // error bubble up crashes the scan-cycle Effect and surfaces noisy
         // FiberFailure traces in the Homebridge log for what's usually just
         // a flaky BLE moment.
-        Effect.catchAll((error) => Effect.succeed({ ok: false as const, error })),
+        Effect.catch((error) => Effect.succeed({ ok: false as const, error })),
       );
       if (outcome.ok) {
         results.push({ entry: outcome.entry, newlyProvisioned: true });

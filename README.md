@@ -9,7 +9,7 @@ a CLI, and a Homebridge plugin for HomeKit integration.
 | Path                   | Package name          | Role                                                                                                                                        |
 | ---------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
 | `packages/core/`       | `@godox-tl/core`      | Domain types, `LightController` service, registry, factory conveniences, and an experimental DMX transport kept out of the main TL30 path.  |
-| `packages/cli/`        | `@godox-tl/cli`       | `godox` binary built on `@effect/cli` — scan / lights / provision / rebind / set / off / rename / forget.                                   |
+| `packages/cli/`        | `@godox-tl/cli`       | `godox` binary built on Effect 4 `effect/cli` — scan / lights / provision / rebind / set / off / rename / forget.                           |
 | `packages/mesh/`       | `@godox-tl/mesh`      | Primary native Node BLE transport for TL30: provisioning, rebind, CCT, HSI, RGBW, FX, off, and scan via `@stoprocent/noble`.                |
 | `packages/homebridge/` | `homebridge-godox-tl` | Homebridge dynamic platform plugin. CCT/color/presets over HomeKit, registry-first startup, periodic scan, and auto-provision/re-provision. |
 
