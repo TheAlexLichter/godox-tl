@@ -201,3 +201,13 @@ gated by `MESH_HARDWARE_AVAILABLE=1` and skipped by default.
 MIT. Includes protocol work derived from
 [`mattharrison/godox-ul60bi-bt`](https://github.com/mattharrison/godox-ul60bi-bt),
 also MIT.
+
+### Cancelling queued commands
+
+Controller sends use a scoped Effect mailbox. Cancelling a queued caller removes
+its request before it reserves sequences or writes BLE data. Coalescing selects
+the newest remaining caller and preserves that caller's logging context.
+Cancelling the last waiter for an active command interrupts it and waits for its
+cleanup before another command runs; this cannot undo writes already accepted
+by the native Bluetooth stack. Closing the controller settles queued callers and
+joins the active cleanup. Idle workers exit rather than keeping CLI processes alive.
