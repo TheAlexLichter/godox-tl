@@ -294,7 +294,7 @@ interface SequenceLease extends SequenceReservation {
 
 const acquireReservation = async (
   state: MeshState,
-  count: number,
+  count: number | ((nextSequenceNumber: number) => number),
   options: SequenceOptions,
   signal: AbortSignal,
 ): Promise<SequenceLease> => {
@@ -303,9 +303,7 @@ const acquireReservation = async (
     !integer(state.ivIndex, 0xffff_ffff) ||
     !integer(state.provisionerAddress, 0x7fff) ||
     state.provisionerAddress === 0 ||
-    state.networkKey.length !== 16 ||
-    !Number.isInteger(count) ||
-    count < 1
+    state.networkKey.length !== 16
   ) {
     throw new Error("invalid mesh sequence reservation");
   }
@@ -430,11 +428,16 @@ const acquireReservation = async (
           next = Math.max(next, peer.sequenceNumber);
         }
       }
-      if (next + count > MAX_SEQUENCE + 1)
+      // Resolve dynamic message selection only after reading the actual source
+      // high-water mark under the lease. It must run once, before any writes.
+      const reservedCount = typeof count === "function" ? count(next) : count;
+      if (!Number.isInteger(reservedCount) || reservedCount < 1)
+        throw new Error("invalid mesh sequence reservation count");
+      if (next + reservedCount > MAX_SEQUENCE + 1)
         throw new Error("mesh sequence numbers exhausted; an IV update is required");
       const reservation = {
         sequenceNumber: next,
-        nextSequenceNumber: next + count,
+        nextSequenceNumber: next + reservedCount,
         sequenceDirectory: directory,
       };
       const counter: Counter = {
@@ -468,10 +471,12 @@ const acquireReservation = async (
 /** Persist a reservation before use and hold the source lock through transmission.
  * Configuration messages and control messages use this same lease, preventing a
  * later process from sending its higher sequence before this block is delivered.
+ * A synchronous count callback observes the resolved next sequence under that
+ * lock, allowing message selection to react to intervening source reservations.
  */
 export const withMeshSequenceReservation = <A, E, R>(
   state: MeshState,
-  count: number,
+  count: number | ((nextSequenceNumber: number) => number),
   options: SequenceOptions,
   use: (reservation: SequenceReservation) => Effect.Effect<A, E, R>,
 ): Effect.Effect<A, E | MeshStateError, R> =>
@@ -515,7 +520,7 @@ export const withMeshSequenceReservation = <A, E, R>(
  */
 export const reserveMeshSequences = (
   state: MeshState,
-  count: number,
+  count: number | ((nextSequenceNumber: number) => number),
   options: SequenceOptions = {},
 ): Effect.Effect<SequenceReservation, MeshStateError> =>
   withMeshSequenceReservation(state, count, options, (reservation) =>
