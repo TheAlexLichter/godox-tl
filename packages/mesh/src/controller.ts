@@ -122,6 +122,8 @@ export const makeMeshController = (options: MeshControllerOptions): LightControl
   let inFlight: Promise<void> | undefined;
   let pending: ReadonlyArray<PendingSend> = [];
   let powerState: "unknown" | "on" | "off" = "unknown";
+  let lastSuccessfulSource: string | undefined;
+  let lastSuccessfulNextSequence: number | undefined;
   let closing: PendingWriterClose | undefined;
 
   const clearIdleTimer = (): void => {
@@ -158,6 +160,8 @@ export const makeMeshController = (options: MeshControllerOptions): LightControl
       const current = writer ?? (closing?.settled ? closing.writer : undefined);
       writer = undefined;
       powerState = "unknown";
+      lastSuccessfulSource = undefined;
+      lastSuccessfulNextSequence = undefined;
       if (current) {
         const runtime = yield* Effect.runtime<never>();
         const attempt = Effect.suspend(() => current.close()).pipe(
@@ -230,6 +234,8 @@ export const makeMeshController = (options: MeshControllerOptions): LightControl
         Effect.sync(() => {
           writer = conn;
           powerState = "unknown";
+          lastSuccessfulSource = undefined;
+          lastSuccessfulNextSequence = undefined;
         }),
       ),
       Effect.tap(() =>
@@ -297,49 +303,65 @@ export const makeMeshController = (options: MeshControllerOptions): LightControl
       const payload = yield* buildPayload(cmd);
       clearIdleTimer();
       // A new connection has unknown power state, so acquire it before deciding
-      // whether settings need an explicit wake. Warm slider updates need no wake.
+      // whether settings need an explicit wake.
       const conn = options.dryRun ? undefined : yield* writerForSend();
-      const payloads =
-        cmd._tag === "Off"
-          ? [payload, payload]
-          : powerState === "on"
-            ? [payload]
-            : [encodeOn(), encodeOn(), payload];
-
       const state = yield* loadMeshState(options.statePath).pipe(
         Effect.mapError((cause) => transportError(options.address, cause)),
       );
-      yield* withMeshSequenceReservation(state, payloads.length, options, (reservation) =>
-        Effect.gen(function* () {
-          const proxyPdus = payloads.map((godoxV2Payload, index) =>
-            encodeGodoxFrame({
-              netKey: state.networkKey,
-              appKey: state.appKey,
-              src: state.provisionerAddress,
-              dst: state.nodeAddress,
-              seq: reservation.sequenceNumber + index,
-              ivIndex: state.ivIndex,
-              vendorOpcode: VENDOR_OPCODE,
-              godoxV2Payload,
-            }),
-          );
-          if (options.dryRun) {
-            for (const [index, pdu] of proxyPdus.entries())
-              yield* Effect.logInfo(
-                `[mesh dry-run] addr=${options.address} seq=${reservation.sequenceNumber + index} pdu=${Array.from(pdu, (b) => b.toString(16).padStart(2, "0")).join("")}`,
-              );
-          } else if (conn) {
-            yield* Effect.logDebug(`[mesh] sending ${cmd._tag} to ${options.address}`);
-            yield* writePdus(conn, proxyPdus);
-            const runtime = yield* Effect.runtime<never>();
-            yield* Effect.sync(() => {
-              powerState = cmd._tag === "Off" ? "off" : "on";
-              // Closing an uncached writer resets power state, so update it first.
-              scheduleIdleClose(runtime);
-            });
-            yield* Effect.logDebug(`[mesh] sent ${cmd._tag} to ${options.address}`);
-          }
-        }),
+      const source = `${Buffer.from(state.networkKey).toString("hex")}:${state.provisionerAddress}:${state.ivIndex}:${state.nodeAddress}`;
+      let payloads: ReadonlyArray<Uint8Array> = [];
+      yield* withMeshSequenceReservation(
+        state,
+        (nextSequenceNumber) => {
+          // The shared source lease serializes this check with every cooperating
+          // controller. Any intervening reservation invalidates our warm-state
+          // assumption, including an Off sent by another process or controller.
+          const warm =
+            powerState === "on" &&
+            lastSuccessfulSource === source &&
+            lastSuccessfulNextSequence === nextSequenceNumber;
+          payloads =
+            cmd._tag === "Off"
+              ? [payload, payload]
+              : warm
+                ? [payload]
+                : [encodeOn(), encodeOn(), payload];
+          return payloads.length;
+        },
+        options,
+        (reservation) =>
+          Effect.gen(function* () {
+            const proxyPdus = payloads.map((godoxV2Payload, index) =>
+              encodeGodoxFrame({
+                netKey: state.networkKey,
+                appKey: state.appKey,
+                src: state.provisionerAddress,
+                dst: state.nodeAddress,
+                seq: reservation.sequenceNumber + index,
+                ivIndex: state.ivIndex,
+                vendorOpcode: VENDOR_OPCODE,
+                godoxV2Payload,
+              }),
+            );
+            if (options.dryRun) {
+              for (const [index, pdu] of proxyPdus.entries())
+                yield* Effect.logInfo(
+                  `[mesh dry-run] addr=${options.address} seq=${reservation.sequenceNumber + index} pdu=${Array.from(pdu, (b) => b.toString(16).padStart(2, "0")).join("")}`,
+                );
+            } else if (conn) {
+              yield* Effect.logDebug(`[mesh] sending ${cmd._tag} to ${options.address}`);
+              yield* writePdus(conn, proxyPdus);
+              const runtime = yield* Effect.runtime<never>();
+              yield* Effect.sync(() => {
+                powerState = cmd._tag === "Off" ? "off" : "on";
+                lastSuccessfulSource = source;
+                lastSuccessfulNextSequence = reservation.nextSequenceNumber;
+                // Closing an uncached writer resets power state, so update it first.
+                scheduleIdleClose(runtime);
+              });
+              yield* Effect.logDebug(`[mesh] sent ${cmd._tag} to ${options.address}`);
+            }
+          }),
       ).pipe(
         Effect.mapError((cause) =>
           cause instanceof TransportError || cause instanceof TransportUnsupportedError
