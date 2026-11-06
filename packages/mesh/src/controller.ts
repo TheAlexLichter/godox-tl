@@ -122,8 +122,8 @@ export const makeMeshController = (options: MeshControllerOptions): LightControl
   let inFlight: Promise<void> | undefined;
   let pending: ReadonlyArray<PendingSend> = [];
   let powerState: "unknown" | "on" | "off" = "unknown";
-  let lastSuccessfulSource: string | undefined;
-  let lastSuccessfulNextSequence: number | undefined;
+  let powerConfidenceSource: string | undefined;
+  let powerConfidenceNextSequence: number | undefined;
   let closing: PendingWriterClose | undefined;
 
   const clearIdleTimer = (): void => {
@@ -151,17 +151,17 @@ export const makeMeshController = (options: MeshControllerOptions): LightControl
       );
     });
 
-  const closeWriter = (): Effect.Effect<void> =>
+  const closeWriter = (retryFailed = false): Effect.Effect<void> =>
     Effect.gen(function* () {
       clearIdleTimer();
       // A failed cleanup stays fenced until a later cleanup succeeds. Starting
       // another connection while its native disconnect is pending can close the
       // new link, because Noble can reuse the same peripheral object.
-      const current = writer ?? (closing?.settled ? closing.writer : undefined);
+      const current = writer ?? (retryFailed && closing?.settled ? closing.writer : undefined);
       writer = undefined;
       powerState = "unknown";
-      lastSuccessfulSource = undefined;
-      lastSuccessfulNextSequence = undefined;
+      powerConfidenceSource = undefined;
+      powerConfidenceNextSequence = undefined;
       if (current) {
         const runtime = yield* Effect.runtime<never>();
         const attempt = Effect.suspend(() => current.close()).pipe(
@@ -175,7 +175,10 @@ export const makeMeshController = (options: MeshControllerOptions): LightControl
         const cleanup: PendingWriterClose = {
           writer: current,
           result: Runtime.runPromiseExit(runtime)(
-            attempt.pipe(Effect.catchAllCause(() => attempt)),
+            attempt.pipe(
+              Effect.catchAllCause(() => attempt),
+              Effect.interruptible,
+            ),
           ),
           settled: false,
         };
@@ -234,8 +237,8 @@ export const makeMeshController = (options: MeshControllerOptions): LightControl
         Effect.sync(() => {
           writer = conn;
           powerState = "unknown";
-          lastSuccessfulSource = undefined;
-          lastSuccessfulNextSequence = undefined;
+          powerConfidenceSource = undefined;
+          powerConfidenceNextSequence = undefined;
         }),
       ),
       Effect.tap(() =>
@@ -250,25 +253,34 @@ export const makeMeshController = (options: MeshControllerOptions): LightControl
   const withSendTimeout = (
     cmd: Domain.LightCommand,
   ): Effect.Effect<void, TransportError | TransportUnsupportedError> =>
-    sendNow(cmd).pipe(
-      Effect.catchAll((error) => {
-        if (!(error instanceof TransportError) || !(error.cause instanceof BleError)) {
-          return Effect.fail(error);
-        }
-        return Effect.logDebug(
-          `[mesh] retrying ${cmd._tag} on a fresh writer for ${options.address}`,
-        ).pipe(Effect.zipRight(closeWriter()), Effect.zipRight(sendNow(cmd)));
-      }),
-      Effect.timeoutFail({
-        duration: Duration.millis(sendTimeoutMs),
-        onTimeout: () =>
-          transportError(
-            options.address,
-            new Error(`${cmd._tag} send timed out after ${sendTimeoutMs}ms`),
+    Effect.suspend(() => {
+      // Only a new queued command can retry a previously failed cleanup. Error
+      // handlers for this command join it, keeping cleanup grace bounded to 6s.
+      const recoverPreviousClose = closing?.settled ? closeWriter(true) : Effect.void;
+      return recoverPreviousClose.pipe(
+        Effect.zipRight(
+          sendNow(cmd).pipe(
+            Effect.catchAll((error) => {
+              if (!(error instanceof TransportError) || !(error.cause instanceof BleError)) {
+                return Effect.fail(error);
+              }
+              return Effect.logDebug(
+                `[mesh] retrying ${cmd._tag} on a fresh writer for ${options.address}`,
+              ).pipe(Effect.zipRight(closeWriter()), Effect.zipRight(sendNow(cmd)));
+            }),
           ),
-      }),
-      Effect.tapError(() => closeWriter()),
-    );
+        ),
+        Effect.timeoutFail({
+          duration: Duration.millis(sendTimeoutMs),
+          onTimeout: () =>
+            transportError(
+              options.address,
+              new Error(`${cmd._tag} send timed out after ${sendTimeoutMs}ms`),
+            ),
+        }),
+        Effect.tapError(() => closeWriter()),
+      );
+    });
 
   const writePdus = (
     conn: ProxyWriterConnection,
@@ -294,7 +306,7 @@ export const makeMeshController = (options: MeshControllerOptions): LightControl
       yield* Effect.logDebug(
         `[mesh] write complete for ${options.address} in ${Date.now() - startedAt}ms`,
       );
-    }).pipe(Effect.catchAll((e) => closeWriter().pipe(Effect.flatMap(() => Effect.fail(e)))));
+    });
 
   const sendNow = (
     cmd: Domain.LightCommand,
@@ -318,8 +330,8 @@ export const makeMeshController = (options: MeshControllerOptions): LightControl
           // assumption, including an Off sent by another process or controller.
           const warm =
             powerState === "on" &&
-            lastSuccessfulSource === source &&
-            lastSuccessfulNextSequence === nextSequenceNumber;
+            powerConfidenceSource === source &&
+            powerConfidenceNextSequence === nextSequenceNumber;
           payloads =
             cmd._tag === "Off"
               ? [payload, payload]
@@ -354,14 +366,18 @@ export const makeMeshController = (options: MeshControllerOptions): LightControl
               const runtime = yield* Effect.runtime<never>();
               yield* Effect.sync(() => {
                 powerState = cmd._tag === "Off" ? "off" : "on";
-                lastSuccessfulSource = source;
-                lastSuccessfulNextSequence = reservation.nextSequenceNumber;
+                powerConfidenceSource = source;
+                powerConfidenceNextSequence = reservation.nextSequenceNumber;
                 // Closing an uncached writer resets power state, so update it first.
                 scheduleIdleClose(runtime);
               });
               yield* Effect.logDebug(`[mesh] sent ${cmd._tag} to ${options.address}`);
             }
-          }),
+          }).pipe(
+            // Keep the shared source lease until disconnect cleanup finishes,
+            // including when the overall send deadline interrupts a write.
+            Effect.onExit((exit) => (Exit.isFailure(exit) ? closeWriter() : Effect.void)),
+          ),
       ).pipe(
         Effect.mapError((cause) =>
           cause instanceof TransportError || cause instanceof TransportUnsupportedError
