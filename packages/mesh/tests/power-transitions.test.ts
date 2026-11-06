@@ -63,6 +63,7 @@ class PowerNoble extends EventEmitter implements NobleLike {
   connections = 0;
   disconnects = 0;
   meshState = initialState;
+  proxyAddress = "AA:BB:CC:DD:EE:FF";
   readonly frames: Frame[] = [];
 
   constructor(private readonly onWrite?: (frame: Frame) => void) {
@@ -71,7 +72,7 @@ class PowerNoble extends EventEmitter implements NobleLike {
 
   async startScanningAsync(): Promise<void> {
     const peripheral = {
-      address: "AA:BB:CC:DD:EE:FF",
+      address: this.proxyAddress,
       state: "disconnected",
       advertisement: { serviceUuids: [MESH_PROXY_SERVICE_UUID] },
       connectAsync: async (): Promise<void> => {
@@ -219,12 +220,15 @@ test("an Off from another controller invalidates warm power confidence under the
   __setNobleForTesting(noble);
   const options = { address: "AA:BB:CC:DD:EE:FF", statePath };
   const warmController = makeMeshController(options);
-  const otherController = makeMeshController(options);
+  const otherProxyAddress = "11:22:33:44:55:66";
+  const otherController = makeMeshController({ ...options, address: otherProxyAddress });
 
   await Effect.runPromise(warmController.send(activeCommands[0]!));
   await Effect.runPromise(warmController.send(activeCommands[0]!));
   expect(noble.frames.map((frame) => frame.payload[0])).toEqual([0xfe, 0xfe, 0xf0, 0xf0]);
+  noble.proxyAddress = otherProxyAddress;
   await Effect.runPromise(otherController.send(Domain.Off.make({})));
+  noble.proxyAddress = options.address;
   expect(powered).toBe(false);
   const beforeRestore = noble.frames.length;
 
@@ -234,8 +238,8 @@ test("an Off from another controller invalidates warm power confidence under the
   ]);
   expect(powered).toBe(true);
   expect(settingsWhileOff).toBe(0);
-  // Both controllers retain their own connected writer: source activity, not a
-  // reconnect, must trigger the extra wake on the first controller.
+  // Different proxies target the same mesh node, retaining separate connected
+  // writers: source activity, not a reconnect, must trigger the extra wake.
   expect(noble.connections).toBe(2);
   expect(noble.frames.map((frame) => frame.sequence)).toEqual(
     Array.from({ length: 9 }, (_, index) => initialState.sequenceNumber + index),
