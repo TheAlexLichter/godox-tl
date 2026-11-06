@@ -9,7 +9,7 @@ export type Hue = typeof Hue.Type;
 export const Saturation = Schema.Number.pipe(Schema.between(0, 100), Schema.brand("Saturation"));
 export type Saturation = typeof Saturation.Type;
 
-export const Kelvin = Schema.Number.pipe(Schema.between(2800, 6500), Schema.brand("Kelvin"));
+export const Kelvin = Schema.Number.pipe(Schema.between(2700, 6500), Schema.brand("Kelvin"));
 export type Kelvin = typeof Kelvin.Type;
 
 export const Byte = Schema.Number.pipe(Schema.int(), Schema.between(0, 255), Schema.brand("Byte"));

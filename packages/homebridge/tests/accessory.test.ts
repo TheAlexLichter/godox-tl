@@ -30,14 +30,14 @@ afterEach(() => {
 
 test("mireds<->kelvin round-trips within the supported range", () => {
   expect(miredsToKelvin(MIRED_MIN)).toBe(6494);
-  expect(miredsToKelvin(MIRED_MAX)).toBe(2801);
-  expect(kelvinToMireds(2800)).toBe(MIRED_MAX);
+  expect(miredsToKelvin(MIRED_MAX)).toBe(2703);
+  expect(kelvinToMireds(2700)).toBe(MIRED_MAX);
   expect(kelvinToMireds(6500)).toBe(MIRED_MIN);
 });
 
 test("mireds<->kelvin clamps to the Godox supported range", () => {
   expect(miredsToKelvin(100)).toBe(6500);
-  expect(miredsToKelvin(1000)).toBe(2800);
+  expect(miredsToKelvin(1000)).toBe(2700);
   expect(kelvinToMireds(1500)).toBe(MIRED_MAX);
   expect(kelvinToMireds(9000)).toBe(MIRED_MIN);
   expect(clampMireds(140)).toBe(MIRED_MIN);
@@ -172,6 +172,27 @@ const lightEntry: LightEntry = {
   statePath: "/tmp/missing-godox-test-state.json",
   provisionedAt: new Date(0).toISOString(),
 };
+
+test("HomeKit preserves a 2700K request within its broader accepted mired range", () => {
+  const accessory = new FakeAccessory();
+  const light = new GodoxLightAccessory(
+    lightEntry,
+    accessory as unknown as PlatformAccessory,
+    hap,
+    logger,
+    { enableColor: true, fxPresets: [], rgbwPresets: [] },
+    0,
+  );
+  const service = accessory.getService("Lightbulb") as FakeService;
+
+  service.getCharacteristic("ColorTemperature").set(370);
+  expect(light.currentState.mode).toBe("cct");
+  expect(light.currentState.mireds).toBe(370);
+  expect(miredsToKelvin(light.currentState.mireds)).toBe(2703);
+
+  service.getCharacteristic("ColorTemperature").set(HOMEKIT_MIRED_MAX);
+  expect(light.currentState.mireds).toBe(370);
+});
 
 test("turning off and on restores the last HSI mode instead of falling back to CCT", () => {
   const accessory = new FakeAccessory();

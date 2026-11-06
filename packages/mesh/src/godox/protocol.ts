@@ -88,8 +88,8 @@ const validateBrightness = (value: number): void => {
 };
 
 const validateCct = (value: number): void => {
-  if (!Number.isInteger(value) || value < 2800 || value > 6500) {
-    throw new RangeError("CCT must be between 2800K and 6500K");
+  if (!Number.isInteger(value) || value < 2700 || value > 6500) {
+    throw new RangeError("CCT must be between 2700K and 6500K");
   }
 };
 
@@ -99,7 +99,7 @@ const validateCct = (value: number): void => {
  * @param brightness Brightness percentage in `[0, 100]`. May be fractional; the
  *   integer part becomes the `percent` byte and the first decimal (0-9) is sent
  *   as the V2 `end_byte` (brightness_point).
- * @param kelvin     Color temperature in `[2800, 6500]` Kelvin.
+ * @param kelvin     Color temperature in `[2700, 6500]` Kelvin.
  */
 export const encodeSet = (brightness: number, kelvin: number): Uint8Array => {
   validateBrightness(brightness);
