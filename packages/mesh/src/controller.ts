@@ -3,7 +3,7 @@
 // Mesh Proxy connection, and persists the bumped sequence number.
 
 import { Domain, LightController, TransportError, TransportUnsupportedError } from "@godox-tl/core";
-import { Duration, Effect, Match } from "effect";
+import { Duration, Effect, Match, Runtime } from "effect";
 import { connectProxyWriter } from "./ble/proxy.ts";
 import type { ProxyWriterConnection } from "./ble/types.ts";
 import {
@@ -93,6 +93,7 @@ interface SendWaiter {
 interface PendingSend {
   readonly cmd: Domain.LightCommand;
   readonly waiters: ReadonlyArray<SendWaiter>;
+  readonly runtime: Runtime.Runtime<never>;
 }
 
 const transportError = (address: string, cause: unknown): TransportError =>
@@ -301,43 +302,51 @@ export const makeMeshController = (options: MeshControllerOptions): LightControl
     }
   };
 
-  const runQueued = (cmd: Domain.LightCommand, waiters: ReadonlyArray<SendWaiter>): void => {
-    inFlight = Effect.runPromise(withSendTimeout(cmd))
+  const runQueued = (
+    cmd: Domain.LightCommand,
+    waiters: ReadonlyArray<SendWaiter>,
+    runtime: Runtime.Runtime<never>,
+  ): void => {
+    inFlight = Runtime.runPromise(runtime)(withSendTimeout(cmd))
       .then(() => settle(waiters))
       .catch((error: unknown) => settle(waiters, error))
       .then(() => {
         const [next, ...rest] = pending;
         pending = rest;
         if (next) {
-          runQueued(next.cmd, next.waiters);
+          runQueued(next.cmd, next.waiters, next.runtime);
         } else {
           inFlight = undefined;
         }
       });
   };
 
-  const enqueue = (cmd: Domain.LightCommand): Promise<void> =>
+  const enqueue = (cmd: Domain.LightCommand, runtime: Runtime.Runtime<never>): Promise<void> =>
     new Promise<void>((resolve, reject) => {
       const waiter = { resolve, reject };
       if (!inFlight) {
-        runQueued(cmd, [waiter]);
+        runQueued(cmd, [waiter], runtime);
         return;
       }
       if (!coalesce) {
-        pending = [...pending, { cmd, waiters: [waiter] }];
+        pending = [...pending, { cmd, waiters: [waiter], runtime }];
         return;
       }
       const waiters = pending.flatMap((send) => send.waiters);
-      pending = [{ cmd, waiters: [...waiters, waiter] }];
+      // The newest command replaces the pending work, so its runtime owns the
+      // actual send; callers whose commands were superseded still settle with it.
+      pending = [{ cmd, waiters: [...waiters, waiter], runtime }];
     });
 
   return {
     send: (cmd) =>
       options.dryRun
         ? sendNow(cmd)
-        : Effect.tryPromise({
-            try: () => enqueue(cmd),
-            catch: (cause) => cause as TransportError | TransportUnsupportedError,
-          }),
+        : Effect.flatMap(Effect.runtime<never>(), (runtime) =>
+            Effect.tryPromise({
+              try: () => enqueue(cmd, runtime),
+              catch: (cause) => cause as TransportError | TransportUnsupportedError,
+            }),
+          ),
   };
 };
