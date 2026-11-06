@@ -105,7 +105,7 @@ settings form. The platform alias is:
 | `scanIntervalSeconds`    | `60`                  | Periodic scan interval. Clamped to at least 10 seconds.                                                        |
 | `bleFindTimeoutMs`       | `20000`               | Per-command scan timeout for finding the target light before reporting it missing.                             |
 | `bleWriteTimeoutMs`      | `5000`                | Per-command GATT write timeout after the light is connected.                                                   |
-| `bleSendTimeoutMs`       | `70000`               | Hard timeout for the full scan, connect, discovery, and write flow.                                            |
+| `bleSendTimeoutMs`       | `70000`               | Shared deadline for connection and writes across retries; failure cleanup may add up to 6s.                    |
 | `discoveryFilters`       | `["^GD_LED$"]`        | JavaScript regex patterns matched against advertised BLE names.                                                |
 | `nameTemplate`           | `"godox-{shortAddr}"` | Name assigned to auto-provisioned lights. `{shortAddr}` expands to the last 6 hex chars of the BLE address.    |
 | `enableColor`            | `true`                | Adds HomeKit `Hue` and `Saturation` controls backed by Godox HSI mode.                                         |

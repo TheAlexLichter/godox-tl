@@ -76,7 +76,7 @@
       },
       "bleSendTimeoutMs": {
         "title": "BLE send timeout (ms)",
-        "description": "Hard timeout for a full HomeKit control command, including scan, connect, service discovery, and write. The default is long enough for a light found near the end of the scan window.",
+        "description": "Shared deadline for connection and writes across control-command retries. Failure cleanup may take up to six additional seconds. The default allows time for a light found near the end of the scan window.",
         "type": "integer",
         "default": 70000,
         "minimum": 5000,
