@@ -191,6 +191,74 @@ test("a source lease prevents a later block from transmitting before an earlier 
   expect(transmissions).toEqual([7, 8, 9]);
 });
 
+test("dynamic counts observe the persisted high-water mark exactly once under the lease", async () => {
+  await Effect.runPromise(reserveMeshSequences(state(100), 2, { sequenceDirectory }));
+  let entered: (() => void) | undefined;
+  let release: (() => void) | undefined;
+  const holding = new Promise<void>((done) => {
+    entered = done;
+  });
+  const barrier = new Promise<void>((done) => {
+    release = done;
+  });
+  const first = Effect.runPromise(
+    withMeshSequenceReservation(state(), 2, { sequenceDirectory }, () =>
+      Effect.promise(async () => {
+        entered?.();
+        await barrier;
+      }),
+    ),
+  );
+  await holding;
+  const seen: number[] = [];
+  const second = Effect.runPromise(
+    reserveMeshSequences(
+      state(),
+      (next) => {
+        seen.push(next);
+        return 3;
+      },
+      { sequenceDirectory },
+    ),
+  );
+  try {
+    await new Promise((done) => setTimeout(done, 30));
+    expect(seen).toEqual([]);
+  } finally {
+    release?.();
+  }
+  await first;
+  const result = await second;
+  expect(seen).toEqual([104]);
+  expect(result.sequenceNumber).toBe(104);
+  expect(result.nextSequenceNumber).toBe(107);
+});
+
+test("invalid dynamic counts do not advance the shared counter", async () => {
+  await Effect.runPromise(reserveMeshSequences(state(), 2, { sequenceDirectory }));
+  const before = await readFile(await counterPath(), "utf8");
+  for (const invalid of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+    const seen: number[] = [];
+    const result = await Effect.runPromiseExit(
+      reserveMeshSequences(
+        state(),
+        (next) => {
+          seen.push(next);
+          return invalid;
+        },
+        { sequenceDirectory },
+      ),
+    );
+    expect(result._tag).toBe("Failure");
+    expect(seen).toEqual([9]);
+    expect(await readFile(await counterPath(), "utf8")).toBe(before);
+  }
+  expect(
+    (await Effect.runPromise(reserveMeshSequences(state(), 1, { sequenceDirectory })))
+      .sequenceNumber,
+  ).toBe(9);
+});
+
 test("restoring an old light file cannot roll back durable reservations", async () => {
   const path = join(directory, "state.json");
   await Effect.runPromise(saveMeshState(path, state()));
