@@ -2,12 +2,13 @@
 // the MESH_BLE_AVAILABLE env var so CI never tries to drive a real adapter.
 
 import { EventEmitter } from "node:events";
-import { Effect } from "effect";
+import { Effect, Exit, Scope } from "effect";
 import { afterEach, expect, test, vi } from "vite-plus/test";
 import {
   __setNobleForTesting,
   buildDiscoveredDevice,
   connectProxyWriter,
+  connectProxy,
   dedupeDevices,
   MESH_PROVISIONING_SERVICE_UUID,
   MESH_PROXY_SERVICE_UUID,
@@ -15,6 +16,7 @@ import {
 } from "../src/ble/index.ts";
 import type { NobleLike, PeripheralLike } from "../src/ble/noble.ts";
 import { inferredDirectAddressType } from "../src/ble/proxy.ts";
+import { BleError } from "../src/ble/errors.ts";
 
 const hardwareAvailable = process.env.MESH_BLE_AVAILABLE === "1";
 
@@ -477,6 +479,303 @@ test("connectProxyWriter: a timed-out close joins its pending native disconnect"
   await secondClose;
   await Effect.runPromise(writer.close());
   expect(disconnect).toHaveBeenCalledTimes(1);
+});
+
+test.each(["direct", "scanned"] as const)(
+  "connectProxyWriter: %s reconnect waits for another writer's pending disconnect",
+  async (route) => {
+    vi.useFakeTimers();
+    let releaseDisconnect!: () => void;
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const disconnected = new Promise<void>((resolve) => {
+      releaseDisconnect = resolve;
+    });
+    const peripheral = {
+      address: "A4:C1:38:21:09:80",
+      id: "83e72030ef94629921dd372408de38c2",
+      state: "connected",
+      connectAsync: vi.fn(async () => {
+        peripheral.state = "connected";
+      }),
+      disconnectAsync: vi.fn(async () => {
+        markStarted();
+        await disconnected;
+        peripheral.state = "disconnected";
+      }),
+      discoverServicesAsync: async () => [
+        {
+          uuid: MESH_PROXY_SERVICE_UUID,
+          discoverCharacteristicsAsync: async () => [
+            { uuid: "2add", properties: ["writeWithoutResponse"] },
+          ],
+        },
+      ],
+    };
+    class PendingDisconnectNoble extends EventEmitter implements NobleLike {
+      state = "poweredOn";
+      connectAsync = vi.fn(async (address: string) => {
+        if (address === "A4:C1:38:1B:F8:73")
+          return { ...peripheral, address, disconnectAsync: async () => {} };
+        peripheral.state = "connected";
+        return peripheral;
+      });
+      async startScanningAsync(): Promise<void> {
+        queueMicrotask(() => this.emit("discover", peripheral));
+      }
+      async stopScanningAsync(): Promise<void> {}
+    }
+    const noble = new PendingDisconnectNoble();
+    __setNobleForTesting(noble);
+    const first = await Effect.runPromise(
+      connectProxyWriter(peripheral.address, { directAddressType: "public" }),
+    );
+    const closing = Effect.runPromiseExit(first.close());
+    await started;
+    await vi.advanceTimersByTimeAsync(3000);
+    expect((await closing)._tag).toBe("Failure");
+    // Noble can report disconnected before the old native operation completes.
+    peripheral.state = "disconnected";
+
+    const reconnect = () =>
+      route === "direct"
+        ? connectProxyWriter(peripheral.address.toLowerCase(), { directAddressType: "public" })
+        : connectProxyWriter("83E72030-EF94-6299-21DD-372408DE38C2");
+    const blocked = Effect.runPromise(Effect.flip(reconnect()));
+    await vi.advanceTimersByTimeAsync(3000);
+    const error = await blocked;
+    expect(error).toBeInstanceOf(BleError);
+    expect(error.message).toContain("replacement connection blocked");
+    expect(noble.connectAsync).toHaveBeenCalledTimes(1);
+    expect(peripheral.connectAsync).not.toHaveBeenCalled();
+    expect(peripheral.disconnectAsync).toHaveBeenCalledTimes(1);
+
+    // The guard belongs to this peripheral, rather than blocking the adapter.
+    const unrelated = await Effect.runPromise(
+      connectProxyWriter("A4:C1:38:1B:F8:73", { directAddressType: "public" }),
+    );
+    await Effect.runPromise(unrelated.close());
+    releaseDisconnect();
+    await vi.advanceTimersByTimeAsync(0);
+    const recovered = Effect.runPromise(reconnect());
+    await vi.advanceTimersByTimeAsync(3000);
+    const replacement = await recovered;
+    expect(replacement.isConnected?.()).toBe(true);
+    await Effect.runPromise(first.close());
+    expect(first.isConnected?.()).toBe(false);
+    expect(peripheral.disconnectAsync).toHaveBeenCalledTimes(1);
+    expect(replacement.isConnected?.()).toBe(true);
+    expect(noble.connectAsync).toHaveBeenCalledTimes(route === "direct" ? 3 : 2);
+    expect(peripheral.connectAsync).toHaveBeenCalledTimes(route === "scanned" ? 1 : 0);
+    await Effect.runPromise(replacement.close());
+  },
+);
+
+test.each(["direct", "scanned"] as const)(
+  "connectProxyWriter: an old close cannot cancel a newer %s connection attempt",
+  async (route) => {
+    vi.useFakeTimers();
+    let releaseConnect!: () => void;
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const pending = new Promise<void>((resolve) => {
+      releaseConnect = resolve;
+    });
+    const peripheral = {
+      address: "A4:C1:38:21:09:80",
+      id: "83e72030ef94629921dd372408de38c2",
+      state: "connected",
+      cancelConnect: vi.fn(),
+      connectAsync: vi.fn(async () => {
+        peripheral.state = "connecting";
+        markStarted();
+        await pending;
+        peripheral.state = "connected";
+      }),
+      disconnectAsync: vi.fn(async () => {
+        throw new Error("native close rejected");
+      }),
+      discoverServicesAsync: async () => [
+        {
+          uuid: MESH_PROXY_SERVICE_UUID,
+          discoverCharacteristicsAsync: async () => [
+            { uuid: "2add", properties: ["writeWithoutResponse"] },
+          ],
+        },
+      ],
+    };
+    class ReconnectingNoble extends EventEmitter implements NobleLike {
+      state = "poweredOn";
+      calls = 0;
+      async connectAsync() {
+        if (this.calls++ > 0) await peripheral.connectAsync();
+        return peripheral;
+      }
+      async startScanningAsync(): Promise<void> {
+        queueMicrotask(() => this.emit("discover", peripheral));
+      }
+      async stopScanningAsync(): Promise<void> {}
+    }
+    __setNobleForTesting(new ReconnectingNoble());
+    const old = await Effect.runPromise(
+      connectProxyWriter(peripheral.address, { directAddressType: "public" }),
+    );
+    expect((await Effect.runPromiseExit(old.close()))._tag).toBe("Failure");
+    const replacement = Effect.runPromise(
+      route === "direct"
+        ? connectProxyWriter(peripheral.address.toLowerCase(), { directAddressType: "public" })
+        : connectProxyWriter("83E72030-EF94-6299-21DD-372408DE38C2"),
+    );
+    await started;
+    await Effect.runPromise(old.close());
+    expect(peripheral.disconnectAsync).toHaveBeenCalledTimes(1);
+    expect(peripheral.cancelConnect).not.toHaveBeenCalled();
+    expect(old.isConnected?.()).toBe(false);
+    releaseConnect();
+    await vi.advanceTimersByTimeAsync(3000);
+    expect((await replacement).isConnected?.()).toBe(true);
+  },
+);
+
+test.each(["direct", "scanned"] as const)(
+  "connectProxyWriter: an abandoned %s connect stays fenced through late disconnect",
+  async (route) => {
+    vi.useFakeTimers();
+    let releaseConnect!: () => void;
+    let releaseDisconnect!: () => void;
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const connecting = new Promise<void>((resolve) => {
+      releaseConnect = resolve;
+    });
+    const disconnecting = new Promise<void>((resolve) => {
+      releaseDisconnect = resolve;
+    });
+    let nativeCalls = 0;
+    const peripheral = {
+      address: "A4:C1:38:21:09:80",
+      id: "83e72030ef94629921dd372408de38c2",
+      state: "disconnected",
+      cancelConnect: vi.fn(),
+      connectAsync: vi.fn(async () => {
+        peripheral.state = "connecting";
+        if (nativeCalls++ === 0) {
+          markStarted();
+          await connecting;
+        }
+        peripheral.state = "connected";
+      }),
+      disconnectAsync: vi.fn(async () => {
+        await disconnecting;
+        peripheral.state = "disconnected";
+      }),
+      discoverServicesAsync: async () => [
+        {
+          uuid: MESH_PROXY_SERVICE_UUID,
+          discoverCharacteristicsAsync: async () => [
+            { uuid: "2add", properties: ["writeWithoutResponse"] },
+          ],
+        },
+      ],
+    };
+    class LateNoble extends EventEmitter implements NobleLike {
+      state = "poweredOn";
+      cancelConnect = vi.fn();
+      async connectAsync() {
+        await peripheral.connectAsync();
+        return peripheral;
+      }
+      async startScanningAsync(): Promise<void> {
+        queueMicrotask(() => this.emit("discover", peripheral));
+      }
+      async stopScanningAsync(): Promise<void> {}
+    }
+    const noble = new LateNoble();
+    __setNobleForTesting(noble);
+    const first = Effect.runPromiseExit(
+      route === "direct"
+        ? connectProxyWriter(peripheral.address, { directAddressType: "public" })
+        : connectProxyWriter("83E72030-EF94-6299-21DD-372408DE38C2"),
+    );
+    await started;
+    await vi.advanceTimersByTimeAsync(route === "direct" ? 7000 : 18000);
+    expect((await first)._tag).toBe("Failure");
+    const reconnect = () =>
+      connectProxyWriter(peripheral.address.toLowerCase(), { directAddressType: "public" });
+    const blocked = Effect.runPromise(Effect.flip(reconnect()));
+    await vi.advanceTimersByTimeAsync(3000);
+    expect((await blocked).message).toContain("replacement connection blocked");
+    expect(nativeCalls).toBe(1);
+    releaseConnect();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(peripheral.disconnectAsync).toHaveBeenCalledTimes(1);
+    const stillBlocked = Effect.runPromise(Effect.flip(reconnect()));
+    await vi.advanceTimersByTimeAsync(3000);
+    expect((await stillBlocked).message).toContain("replacement connection blocked");
+    expect(nativeCalls).toBe(1);
+    releaseDisconnect();
+    await vi.advanceTimersByTimeAsync(0);
+    const fresh = await Effect.runPromise(reconnect());
+    expect(fresh.isConnected?.()).toBe(true);
+    expect(nativeCalls).toBe(2);
+    await Effect.runPromise(fresh.close());
+  },
+);
+
+test("connectProxy: an old scope does not unsubscribe or disconnect a replacement", async () => {
+  const dataOut = Object.assign(new EventEmitter(), {
+    uuid: "2ade",
+    subscribeAsync: vi.fn(async () => {}),
+    unsubscribeAsync: vi.fn(async () => {}),
+  });
+  const peripheral = {
+    address: "A4:C1:38:21:09:80",
+    state: "connected",
+    disconnectAsync: vi.fn(async () => {}),
+    discoverServicesAsync: async () => [
+      {
+        uuid: MESH_PROXY_SERVICE_UUID,
+        discoverCharacteristicsAsync: async () => [
+          { uuid: "2add", properties: ["writeWithoutResponse"] },
+          dataOut,
+        ],
+      },
+    ],
+  };
+  class ScopedNoble extends EventEmitter implements NobleLike {
+    state = "poweredOn";
+    async connectAsync() {
+      return peripheral;
+    }
+    async startScanningAsync(): Promise<void> {}
+    async stopScanningAsync(): Promise<void> {}
+  }
+  __setNobleForTesting(new ScopedNoble());
+  const first = await Effect.runPromise(Scope.make());
+  const second = await Effect.runPromise(Scope.make());
+  const open = (scope: Scope.Scope) =>
+    Effect.runPromise(
+      connectProxy(peripheral.address, { directAddressType: "public" }).pipe(
+        Effect.provideService(Scope.Scope, scope),
+      ),
+    );
+  await open(first);
+  await open(second);
+  expect(dataOut.listenerCount("data")).toBe(2);
+  await Effect.runPromise(Scope.close(first, Exit.void));
+  expect(dataOut.listenerCount("data")).toBe(1);
+  expect(dataOut.unsubscribeAsync).not.toHaveBeenCalled();
+  expect(peripheral.disconnectAsync).not.toHaveBeenCalled();
+  await Effect.runPromise(Scope.close(second, Exit.void));
+  expect(dataOut.listenerCount("data")).toBe(0);
+  expect(dataOut.unsubscribeAsync).toHaveBeenCalledTimes(1);
+  expect(peripheral.disconnectAsync).toHaveBeenCalledTimes(1);
 });
 
 test("connectProxyWriter: direct connection skips scanning when address type is known", async () => {

@@ -8,7 +8,7 @@
 
 import type { Characteristic, Peripheral } from "@stoprocent/noble";
 import { Duration, Effect, type Scope, Stream } from "effect";
-import { matchAddress } from "./address.ts";
+import { matchAddress, normalizeAddress } from "./address.ts";
 import { BleError } from "./errors.ts";
 import { getNoble, type NobleLike, type PeripheralLike, withNobleOperation } from "./noble.ts";
 import { MESH_PROVISIONING_SERVICE_UUID, MESH_PROXY_SERVICE_UUID } from "./scan.ts";
@@ -274,6 +274,144 @@ const discoverProxyDataIn = (
 const STEP_TIMEOUT_MS = 15_000;
 const DISCONNECT_TIMEOUT_MS = 3_000;
 const pendingDisconnects = new WeakMap<Peripheral, Promise<void>>();
+const peripheralOwners = new WeakMap<
+  Peripheral,
+  { readonly noble: NobleLike; readonly addresses: Set<string> }
+>();
+const pendingAddressCleanups = new WeakMap<NobleLike, Map<string, Set<Promise<void>>>>();
+const connectionGenerations = new WeakMap<NobleLike, Map<string, object>>();
+const peripheralGenerations = new WeakMap<Peripheral, object>();
+
+const rememberPeripheral = (noble: NobleLike, peripheral: Peripheral, address?: string): void => {
+  const owner = peripheralOwners.get(peripheral) ?? { noble, addresses: new Set<string>() };
+  for (const identifier of [peripheral.address, peripheral.id, peripheral.uuid, address]) {
+    const normalized = normalizeAddress(identifier);
+    if (normalized) owner.addresses.add(normalized);
+  }
+  peripheralOwners.set(peripheral, owner);
+};
+
+const claimConnection = (
+  noble: NobleLike,
+  identifiers: ReadonlyArray<string>,
+  generation: object,
+  peripheral?: Peripheral,
+): void => {
+  let generations = connectionGenerations.get(noble);
+  if (!generations) {
+    generations = new Map();
+    connectionGenerations.set(noble, generations);
+  }
+  for (const identifier of identifiers) {
+    const address = normalizeAddress(identifier);
+    if (address) generations.set(address, generation);
+  }
+  if (peripheral) peripheralGenerations.set(peripheral, generation);
+};
+
+const ownsConnection = (peripheral: Peripheral, generation: object): boolean => {
+  const owner = peripheralOwners.get(peripheral);
+  return (
+    peripheralGenerations.get(peripheral) === generation &&
+    (!owner ||
+      [...owner.addresses].every(
+        (address) => connectionGenerations.get(owner.noble)?.get(address) === generation,
+      ))
+  );
+};
+
+const trackAddressCleanup = (
+  noble: NobleLike,
+  identifiers: ReadonlyArray<string>,
+  pending: Promise<void>,
+): void => {
+  let addresses = pendingAddressCleanups.get(noble);
+  if (!addresses) {
+    addresses = new Map();
+    pendingAddressCleanups.set(noble, addresses);
+  }
+  for (const address of identifiers) {
+    let operations = addresses.get(address);
+    if (!operations) {
+      operations = new Set();
+      addresses.set(address, operations);
+    }
+    operations.add(pending);
+    const current = operations;
+    const clear = (): void => {
+      current.delete(pending);
+      if (current.size === 0 && addresses.get(address) === current) addresses.delete(address);
+    };
+    void pending.then(clear, clear);
+  }
+};
+
+const pendingAddressCleanup = (
+  noble: NobleLike,
+  identifiers: ReadonlyArray<string | undefined>,
+): Promise<unknown> | undefined => {
+  const operations = new Set<Promise<void>>();
+  for (const identifier of identifiers) {
+    for (const pending of pendingAddressCleanups.get(noble)?.get(normalizeAddress(identifier)) ??
+      [])
+      operations.add(pending);
+  }
+  return operations.size ? Promise.all(operations) : undefined;
+};
+
+const beginConnection = (
+  noble: NobleLike,
+  identifiers: ReadonlyArray<string>,
+  generation: object,
+  peripheral?: Peripheral,
+): Effect.Effect<void, BleError> =>
+  Effect.suspend(() => {
+    // Recheck and claim together: an old handle may start closing after the
+    // asynchronous cleanup wait. Once claimed, its generation cannot close us.
+    if (
+      identifiers.some(
+        (address) => pendingAddressCleanups.get(noble)?.get(normalizeAddress(address))?.size,
+      ) ||
+      (peripheral && pendingDisconnects.has(peripheral))
+    )
+      return Effect.fail(
+        new BleError({
+          message: "Previous BLE cleanup is still pending; replacement connection blocked",
+        }),
+      );
+    claimConnection(noble, identifiers, generation, peripheral);
+    return Effect.void;
+  });
+
+const awaitDisconnect = async (pending: Promise<unknown>): Promise<void> => {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    const disconnected = await Promise.race([
+      pending.then(() => true),
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(false), DISCONNECT_TIMEOUT_MS);
+      }),
+    ]);
+    if (!disconnected) throw new Error(`disconnect timed out after ${DISCONNECT_TIMEOUT_MS}ms`);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+};
+
+const awaitPendingDisconnect = (
+  getPending: () => Promise<unknown> | undefined,
+): Effect.Effect<void, BleError> =>
+  Effect.tryPromise({
+    try: async () => {
+      const pending = getPending();
+      if (pending) await awaitDisconnect(pending);
+    },
+    catch: (cause) =>
+      new BleError({
+        cause,
+        message: `Previous BLE cleanup has not completed; replacement connection blocked: ${String(cause)}`,
+      }),
+  });
 
 const withBleTimeout = <A>(
   effect: Effect.Effect<A, BleError>,
@@ -286,9 +424,13 @@ const withBleTimeout = <A>(
     }),
   );
 
-const disconnectPeripheral = (peripheral: Peripheral): Effect.Effect<void, BleError> =>
+const disconnectPeripheral = (
+  peripheral: Peripheral,
+  generation?: object,
+): Effect.Effect<void, BleError> =>
   Effect.tryPromise({
     try: async () => {
+      if (generation && !ownsConnection(peripheral, generation)) return;
       let pending = pendingDisconnects.get(peripheral);
       if (!pending) {
         if (peripheral.state === "connecting") {
@@ -302,6 +444,8 @@ const disconnectPeripheral = (peripheral: Peripheral): Effect.Effect<void, BleEr
         // finish after the same peripheral has been reconnected.
         pending = Promise.resolve().then(() => peripheral.disconnectAsync());
         pendingDisconnects.set(peripheral, pending);
+        const owner = peripheralOwners.get(peripheral);
+        if (owner) trackAddressCleanup(owner.noble, [...owner.addresses], pending);
         const current = pending;
         const clear = (): void => {
           if (pendingDisconnects.get(peripheral) === current) pendingDisconnects.delete(peripheral);
@@ -309,50 +453,104 @@ const disconnectPeripheral = (peripheral: Peripheral): Effect.Effect<void, BleEr
         void pending.then(clear, clear);
       }
 
-      let timer: NodeJS.Timeout | undefined;
-      try {
-        const disconnected = await Promise.race([
-          pending.then(() => true),
-          new Promise<boolean>((resolve) => {
-            timer = setTimeout(() => resolve(false), DISCONNECT_TIMEOUT_MS);
-          }),
-        ]);
-        if (!disconnected) throw new Error(`disconnect timed out after ${DISCONNECT_TIMEOUT_MS}ms`);
-      } finally {
-        if (timer) clearTimeout(timer);
-      }
+      await awaitDisconnect(pending);
     },
     catch: (cause) =>
       new BleError({ cause, message: `Failed to close BLE connection: ${String(cause)}` }),
   }).pipe(Effect.tapError((error) => Effect.logWarning(`[ble] ${error.message}`)));
 
+const cleanupConnectedPeripheral = async (peripheral: Peripheral): Promise<void> => {
+  await Effect.runPromise(disconnectPeripheral(peripheral)).catch(() => undefined);
+  await pendingDisconnects.get(peripheral)?.catch(() => undefined);
+};
+
 const connectPeripheral = (
+  noble: NobleLike,
   peripheral: Peripheral,
   address: string,
+  generation: object,
 ): Effect.Effect<void, BleError> =>
-  withBleTimeout(
-    Effect.tryPromise({
-      try: () => peripheral.connectAsync(),
-      catch: (cause) =>
-        new BleError({
-          cause,
-          message: `Failed to connect to peripheral '${address}'`,
-        }),
-    }),
-    "connectAsync",
-  ).pipe(
-    Effect.tapError((error) =>
-      Effect.logDebug(
-        `[ble] connect failed for ${address}; cleaning up peripheral: ${error.message}`,
-      ).pipe(Effect.zipRight(disconnectPeripheral(peripheral))),
-    ),
-  );
+  Effect.suspend(() => {
+    let pending: Promise<void> | undefined;
+    let abandonedCleanup: Promise<void> | undefined;
+    let cancelledConnecting = false;
+    const cancel = (): void => {
+      if (!pending || abandonedCleanup) return;
+      abandonedCleanup = pending
+        .catch(() => undefined)
+        .then(() =>
+          cancelledConnecting && peripheral.state === "connecting"
+            ? undefined
+            : cleanupConnectedPeripheral(peripheral),
+        );
+      trackAddressCleanup(
+        noble,
+        [...(peripheralOwners.get(peripheral)?.addresses ?? [])],
+        abandonedCleanup,
+      );
+      if (peripheral.state === "connecting") {
+        try {
+          peripheral.cancelConnect();
+          cancelledConnecting = true;
+        } catch {
+          // The pending native task remains fenced even if cancellation fails.
+        }
+      }
+    };
+    return awaitPendingDisconnect(
+      () =>
+        pendingAddressCleanup(noble, [peripheral.address, peripheral.id, peripheral.uuid]) ??
+        pendingDisconnects.get(peripheral),
+    ).pipe(
+      Effect.zipRight(
+        beginConnection(
+          noble,
+          [...(peripheralOwners.get(peripheral)?.addresses ?? [])],
+          generation,
+          peripheral,
+        ),
+      ),
+      Effect.zipRight(
+        withBleTimeout(
+          Effect.tryPromise({
+            try: () => {
+              pending = Promise.resolve().then(() => peripheral.connectAsync());
+              return pending;
+            },
+            catch: (cause) =>
+              new BleError({
+                cause,
+                message: `Failed to connect to peripheral '${address}'`,
+              }),
+          }),
+          "connectAsync",
+        ).pipe(
+          Effect.tapError((error) =>
+            Effect.logDebug(
+              `[ble] connect failed for ${address}; cleaning up peripheral: ${error.message}`,
+            ).pipe(
+              Effect.zipRight(Effect.sync(cancel)),
+              Effect.zipRight(
+                awaitPendingDisconnect(() => abandonedCleanup).pipe(
+                  Effect.catchAll(() => Effect.void),
+                ),
+              ),
+            ),
+          ),
+          Effect.onInterrupt(() => Effect.sync(cancel)),
+        ),
+      ),
+    );
+  });
 
 const openProxyPeripheral = (
   noble: NobleLike,
   address: string,
   options: ProxyConnectOptions,
-): Effect.Effect<{ readonly peripheral: Peripheral; readonly direct: boolean }, BleError> =>
+): Effect.Effect<
+  { readonly peripheral: Peripheral; readonly direct: boolean; readonly generation: object },
+  BleError
+> =>
   Effect.gen(function* () {
     const addresses = candidateAddresses(address, options.fallbackAddresses);
     const findPeripheralTimeoutMs = Math.max(
@@ -365,27 +563,42 @@ const openProxyPeripheral = (
     const addressType = options.directAddressType ?? inferredDirectAddressType(address);
     const directConnect = noble.connectAsync?.bind(noble);
     if (addressType && directConnect) {
+      yield* awaitPendingDisconnect(() => pendingAddressCleanup(noble, [address]));
       yield* Effect.logDebug(`[ble] connecting directly to ${address} (${addressType})`);
-      let abandoned = false;
+      const generation = {};
+      yield* beginConnection(noble, [address], generation);
+      let abandonedCleanup: Promise<void> | undefined;
       const cancelDirect = (): void => {
-        abandoned = true;
+        if (!abandonedCleanup) {
+          // Cancellation does not guarantee that the native connect is done.
+          // Keep this address fenced through a late result and its disconnect.
+          abandonedCleanup = pending.then(
+            (peripheral) => (peripheral ? cleanupConnectedPeripheral(peripheral) : undefined),
+            () => undefined,
+          );
+          trackAddressCleanup(noble, [normalizeAddress(address)], abandonedCleanup);
+        }
         try {
           noble.cancelConnect?.(address);
         } catch {
           // Continue with discovery even if Noble has already cleared the attempt.
         }
       };
-      const pending = Promise.resolve().then(() => directConnect(address, { addressType }));
-      void pending.then(
-        (peripheral) => {
-          if (abandoned && peripheral) {
-            void Effect.runPromise(disconnectPeripheral(peripheral as Peripheral)).catch(
-              () => undefined,
+      const pending = Promise.resolve()
+        .then(() => directConnect(address, { addressType }))
+        .then((peripheral) => {
+          if (peripheral) {
+            rememberPeripheral(noble, peripheral as Peripheral, address);
+            claimConnection(
+              noble,
+              [...(peripheralOwners.get(peripheral as Peripheral)?.addresses ?? [])],
+              generation,
+              peripheral as Peripheral,
             );
           }
-        },
-        () => undefined,
-      );
+          return peripheral as Peripheral;
+        });
+      void pending.catch(() => undefined);
       const direct = yield* Effect.tryPromise({
         try: async () => {
           const peripheral = await pending;
@@ -398,7 +611,6 @@ const openProxyPeripheral = (
         Effect.timeoutFail({
           duration: Duration.millis(DIRECT_CONNECT_TIMEOUT_MS),
           onTimeout: () => {
-            abandoned = true;
             return new BleError({
               message: `Direct BLE connection to ${address} timed out after ${DIRECT_CONNECT_TIMEOUT_MS}ms`,
             });
@@ -412,14 +624,16 @@ const openProxyPeripheral = (
         Effect.onInterrupt(() => Effect.sync(cancelDirect)),
         Effect.orElseSucceed(() => undefined),
       );
-      if (direct) return { peripheral: direct, direct: true };
+      if (direct) return { peripheral: direct, direct: true, generation };
     }
 
     yield* Effect.logDebug(`[ble] scanning for ${address}`);
     const peripheral = yield* findPeripheral(noble, addresses, findPeripheralTimeoutMs);
+    rememberPeripheral(noble, peripheral);
     yield* Effect.logDebug(`[ble] found peripheral; connecting ${address}`);
-    yield* connectPeripheral(peripheral, address);
-    return { peripheral, direct: false };
+    const generation = {};
+    yield* connectPeripheral(noble, peripheral, address, generation);
+    return { peripheral, direct: false, generation };
   });
 
 export const connectProxy = (
@@ -435,8 +649,14 @@ export const connectProxy = (
       // disconnects on cleanup.
       const opened = yield* Effect.acquireRelease(
         openProxyPeripheral(noble, address, options),
-        ({ peripheral }) =>
-          disconnectPeripheral(peripheral).pipe(Effect.catchAll(() => Effect.void)),
+        ({ peripheral, generation }) =>
+          Effect.suspend(() =>
+            ownsConnection(peripheral, generation)
+              ? disconnectPeripheral(peripheral, generation).pipe(
+                  Effect.catchAll(() => Effect.void),
+                )
+              : Effect.void,
+          ),
       );
       const { peripheral } = opened;
       yield* Effect.logDebug(`[ble] connected; discovering`);
@@ -484,6 +704,7 @@ export const connectProxy = (
         () =>
           Effect.promise(async () => {
             dataOut.removeListener("data", onData);
+            if (!ownsConnection(peripheral, opened.generation)) return;
             await dataOut.unsubscribeAsync().catch(() => {
               /* swallow */
             });
@@ -552,7 +773,11 @@ export const connectProxyWriter = (
       const close = (): Effect.Effect<void, BleError> =>
         Effect.gen(function* () {
           if (closed) return;
-          yield* disconnectPeripheral(peripheral);
+          if (!ownsConnection(peripheral, opened.generation)) {
+            closed = true;
+            return;
+          }
+          yield* disconnectPeripheral(peripheral, opened.generation);
           closed = true;
         });
 
@@ -583,7 +808,10 @@ export const connectProxyWriter = (
         address,
         write,
         close,
-        isConnected: () => !closed && peripheral.state === "connected",
+        isConnected: () =>
+          !closed &&
+          ownsConnection(peripheral, opened.generation) &&
+          peripheral.state === "connected",
       } satisfies ProxyWriterConnection;
     }),
   );
