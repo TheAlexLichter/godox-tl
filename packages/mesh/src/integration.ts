@@ -83,9 +83,7 @@ export const provisionAndRebind = (address: string, options: ProvisionAndRebindO
       sequenceDirectory: rebind.sequenceDirectory,
     };
 
-    if (options.statePath) {
-      yield* saveMeshState(options.statePath, state);
-    }
-
+    // Rebind persisted its reserved range while holding the shared source lease.
+    // A later save here could overwrite a concurrent command's newer state hint.
     return { state, provisioning } satisfies ProvisionAndRebindResult;
   });

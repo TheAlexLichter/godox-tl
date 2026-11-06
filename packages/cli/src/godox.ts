@@ -18,7 +18,6 @@ import {
   makeMeshController,
   provisionAndRebind,
   rebindNode,
-  saveMeshState,
   scanDevices as meshScanDevices,
   shutdownNoble,
 } from "@godox-tl/mesh";
@@ -104,7 +103,7 @@ const rebindCmd = Command.make("rebind", { name: Args.text({ name: "light" }) },
     Effect.gen(function* () {
       const entry = yield* getLight(name);
       const state = yield* loadMeshState(entry.statePath);
-      const result = yield* rebindNode(entry.address, {
+      yield* rebindNode(entry.address, {
         networkKey: state.networkKey,
         appKey: state.appKey,
         deviceKey: state.deviceKey,
@@ -115,11 +114,6 @@ const rebindCmd = Command.make("rebind", { name: Args.text({ name: "light" }) },
         sequenceDirectory: state.sequenceDirectory,
         statePath: entry.statePath,
         statePaths: (yield* listLights()).map((light) => light.statePath),
-      });
-      yield* saveMeshState(entry.statePath, {
-        ...state,
-        sequenceNumber: result.sequenceNumber,
-        sequenceDirectory: result.sequenceDirectory,
       });
       console.log(`Rebound ${entry.name}`);
     }),
