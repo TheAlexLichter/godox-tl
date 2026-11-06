@@ -4,7 +4,7 @@
 writer tests of packet pacing, the shared send deadline, write timeouts, and
 bounded disconnect cleanup. Install `TestClock.layer()` around the whole test
 effect: it supplies both the clock and the tracking scheduler. The controller's
-Promise-backed queue and cleanup capture these services from the caller.
+queued sends and cleanup capture these services from the caller.
 
 Use `Deferred` gates to wait until the writer or cleanup has actually started
 before advancing time. State allocation and lease release still perform real

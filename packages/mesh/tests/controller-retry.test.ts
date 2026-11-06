@@ -57,7 +57,7 @@ const makeWriter = (write: ProxyWriterConnection["write"], isConnected = () => t
   }) satisfies ProxyWriterConnection;
 
 // Install the tracking scheduler as well as the clock. The controller captures
-// this context for its Promise-backed send queue and detached cleanup effects.
+// this context for queued sends and cleanup effects.
 const runWithTestClock = <A, E>(effect: Effect.Effect<A, E>) =>
   Effect.runPromise(Effect.provide(effect, TestClock.layer()));
 
