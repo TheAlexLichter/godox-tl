@@ -37,7 +37,9 @@ beforeEach(async () => {
   connect.mockReset();
   dir = await mkdtemp(join(tmpdir(), "godox-controller-retry-"));
   statePath = join(dir, "state.json");
-  await Effect.runPromise(saveMeshState(statePath, state));
+  await Effect.runPromise(
+    saveMeshState(statePath, { ...state, sequenceDirectory: join(dir, "sequences") }),
+  );
 });
 
 afterEach(async () => {
