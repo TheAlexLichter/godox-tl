@@ -1,6 +1,6 @@
 import { Effect } from "effect";
 import { awaitScanCleanup, ensureScanIdle, type NobleLike, trackScanCleanup } from "./noble.ts";
-import type { BleError } from "./errors.ts";
+import { BleError } from "./errors.ts";
 
 /** Own scan shutdown until it completes, including after cancellation. If a
  * native start/stop hangs, release the operation lock after a bounded wait but
@@ -13,6 +13,7 @@ export const withScanCleanup = <A, E, R>(
   Effect.gen(function* () {
     yield* ensureScanIdle(noble);
     let started: Promise<void> | undefined;
+    let shutdownError: BleError | undefined;
     const start = (startScanning: () => Promise<void>): Promise<void> => {
       started = Promise.resolve().then(startScanning);
       return started;
@@ -27,13 +28,20 @@ export const withScanCleanup = <A, E, R>(
           const cleanup = started
             .catch(() => undefined)
             .then(() => noble.stopScanningAsync())
-            .catch(() => undefined);
+            .catch((cause: unknown) => {
+              shutdownError = new BleError({
+                cause,
+                message: `Failed to stop BLE scan: ${cause instanceof Error ? cause.message : String(cause)}`,
+              });
+            });
           trackScanCleanup(noble, cleanup);
           await awaitScanCleanup(cleanup);
         }),
       ),
-      // Do not proceed to connect after a successful discovery if its scan
-      // shutdown timed out. The adapter is still owned by that old cleanup.
-      Effect.zipLeft(ensureScanIdle(noble)),
+      // Do not proceed to connect if shutdown failed or still owns the adapter.
+      // A rejected stop has settled, so a later operation may attempt recovery.
+      Effect.zipLeft(
+        Effect.suspend(() => (shutdownError ? Effect.fail(shutdownError) : ensureScanIdle(noble))),
+      ),
     );
   });

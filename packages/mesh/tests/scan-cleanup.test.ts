@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { Effect, Exit, Fiber } from "effect";
+import { Cause, Effect, Exit, Fiber, Option } from "effect";
 import { afterEach, expect, test } from "vite-plus/test";
 import {
   connectProxyWriter,
@@ -7,7 +7,7 @@ import {
   shutdownNoble,
   __setNobleForTesting,
 } from "../src/ble/index.ts";
-import type { BleError } from "../src/ble/errors.ts";
+import { BleError } from "../src/ble/errors.ts";
 import { getNoble, type NobleLike } from "../src/ble/noble.ts";
 
 const gate = () => {
@@ -24,6 +24,7 @@ class GatedNoble extends EventEmitter implements NobleLike {
   state = "poweredOn";
   starts = 0;
   stops = 0;
+  connects = 0;
   scanning = false;
   bindingStops = 0;
   readonly firstStarted = gate();
@@ -45,6 +46,11 @@ class GatedNoble extends EventEmitter implements NobleLike {
       this.emit("discover", {
         address: "AA:BB:CC:DD:EE:FF",
         advertisement: { localName: "GD_LED", serviceUuids: ["1828"] },
+        connectAsync: async () => {
+          this.connects++;
+        },
+        disconnectAsync: async () => {},
+        discoverServicesAsync: async () => [],
       }),
     );
   }
@@ -171,6 +177,46 @@ test("successful discovery awaits native scan shutdown before resolving", async 
   expect(await scan).toHaveLength(1);
   expect(resolved).toBe(true);
 });
+
+test.each(["discovery", "peripheral"] as const)(
+  "%s returns a typed failure after scan shutdown rejects and allows a fresh attempt",
+  async (kind) => {
+    const stopFailure = new Error("adapter rejected scan shutdown");
+    class RejectingStopNoble extends GatedNoble {
+      override async stopScanningAsync(): Promise<void> {
+        this.stops++;
+        if (this.stops === 1) throw stopFailure;
+        this.scanning = false;
+      }
+    }
+    const noble = new RejectingStopNoble();
+    noble.releaseFirstStart.release();
+    __setNobleForTesting(noble);
+    const scan: Effect.Effect<unknown, BleError> =
+      kind === "discovery"
+        ? scanDevices({ timeoutSeconds: 0.01 }, noble)
+        : connectProxyWriter("AA:BB:CC:DD:EE:FF", { findPeripheralTimeoutMs: 100 });
+    const exit = await Effect.runPromiseExit(scan);
+    expect(Exit.isFailure(exit)).toBe(true);
+    if (Exit.isFailure(exit)) {
+      expect(Cause.defects(exit.cause)).toHaveLength(0);
+      const failure = Cause.failureOption(exit.cause);
+      expect(Option.isSome(failure)).toBe(true);
+      if (Option.isSome(failure)) {
+        expect(failure.value).toBeInstanceOf(BleError);
+        expect(failure.value.cause).toBe(stopFailure);
+        expect(failure.value.message).toContain("Failed to stop BLE scan");
+      }
+    }
+    expect(noble.connects).toBe(0);
+    expect(noble.listenerCount("discover")).toBe(0);
+    expect(await Effect.runPromise(getNoble)).toBe(noble);
+    expect(await Effect.runPromise(scanDevices({ timeoutSeconds: 0.01 }, noble))).toHaveLength(1);
+    expect(noble.starts).toBe(2);
+    expect(noble.stops).toBe(2);
+    expect(noble.scanning).toBe(false);
+  },
+);
 
 test("successful discovery fails promptly when native shutdown stays pending", async () => {
   const noble = new GatedNoble();
