@@ -15,6 +15,8 @@ a CLI, and a Homebridge plugin for HomeKit integration.
 
 Core stays free of BLE deps; consumers compose `core + mesh`.
 
+Upgrading from 1.x? See the [2.0 migration notes](./MIGRATION.md).
+
 ## Hardware reality
 
 | Model | DMX in | BLE (Godox Light app) | Works via this library |
