@@ -64,6 +64,8 @@ const formatHomeKitValue = (value: unknown): string => {
 };
 
 const RESTORE_ECHO_SUPPRESSION_MS = 1_500;
+// HAPStatus.SERVICE_COMMUNICATION_FAILURE; HAPStatus is an ambient const enum.
+const COMMUNICATION_FAILURE = -70402;
 type HomeKitCharacteristic = NonNullable<ReturnType<Service["getCharacteristic"]>>;
 
 export interface HomeKitFeatureConfig {
@@ -106,6 +108,9 @@ export class GodoxLightAccessory {
   private lastActiveState: CommandState = cloneState({ ...this.state, on: true });
   private restoredMode: CommandState["mode"] | undefined;
   private suppressColorTemperatureModeSwitchUntil = 0;
+  private communicationFailed = false;
+  private nextCommandId = 0;
+  private lastCompletedCommandId = 0;
 
   constructor(
     public readonly entry: LightEntry,
@@ -152,7 +157,7 @@ export class GodoxLightAccessory {
         }
         this.queue();
       })
-      .onGet(() => this.state.on);
+      .onGet(() => this.readValue(this.state.on));
 
     this.service
       .getCharacteristic(this.hap.Characteristic.Brightness)
@@ -162,7 +167,7 @@ export class GodoxLightAccessory {
         if (this.state.brightness > 0) this.state.on = true;
         this.queue();
       })
-      .onGet(() => this.state.brightness);
+      .onGet(() => this.readValue(this.state.brightness));
 
     const colorTemperature = this.service
       .getCharacteristic(this.hap.Characteristic.ColorTemperature)
@@ -187,7 +192,7 @@ export class GodoxLightAccessory {
         }
         this.queue();
       })
-      .onGet(() => this.colorTemperatureForHomeKit());
+      .onGet(() => this.readValue(this.colorTemperatureForHomeKit()));
 
     if (this.features.enableColor) {
       this.service
@@ -202,7 +207,7 @@ export class GodoxLightAccessory {
           this.suppressColorTemperatureEchoFor("hsi");
           this.queue();
         })
-        .onGet(() => this.state.hue);
+        .onGet(() => this.readValue(this.state.hue));
 
       this.service
         .getCharacteristic(this.hap.Characteristic.Saturation)
@@ -216,7 +221,7 @@ export class GodoxLightAccessory {
           this.suppressColorTemperatureEchoFor("hsi");
           this.queue();
         })
-        .onGet(() => this.state.saturation);
+        .onGet(() => this.readValue(this.state.saturation));
     }
 
     for (const [index, preset] of this.features.fxPresets.entries()) {
@@ -355,22 +360,39 @@ export class GodoxLightAccessory {
   }
 
   private runCommand(cmd: Domain.LightCommand, after?: () => void): void {
+    const commandId = ++this.nextCommandId;
     Effect.runPromise(
       (this.controller.send(cmd) as Effect.Effect<void, unknown>).pipe(
         Effect.provide(this.loggerLayer),
+        Effect.tap(() => Effect.sync(() => this.completeCommand(commandId, false))),
         Effect.catchAll((err) =>
           Effect.sync(() => {
+            this.completeCommand(commandId, true);
             this.log.warn(`[${this.entry.name}] send failed: ${this.formatSendError(err)}`);
           }),
         ),
       ),
     )
       .catch((err: unknown) => {
+        this.completeCommand(commandId, true);
         this.log.error(
           `[${this.entry.name}] send failed unexpectedly: ${this.formatSendError(err)}`,
         );
       })
       .finally(after);
+  }
+
+  private completeCommand(commandId: number, failed: boolean): void {
+    if (commandId < this.lastCompletedCommandId) return;
+    this.lastCompletedCommandId = commandId;
+    this.communicationFailed = failed;
+  }
+
+  private readValue<T>(value: T): T {
+    if (this.communicationFailed) {
+      throw new this.hap.HapStatusError(COMMUNICATION_FAILURE);
+    }
+    return value;
   }
 
   private formatSendError(err: unknown): string {
@@ -399,10 +421,10 @@ export class GodoxLightAccessory {
           service.updateCharacteristic(this.hap.Characteristic.On, false);
         });
       })
-      .onGet(() => false);
+      .onGet(() => this.readValue(false));
   }
 
-  /** For test/inspection: current local cache. */
+  /** For test/inspection: desired settings, not confirmed physical output. */
   get currentState(): Readonly<CommandState> {
     return this.state;
   }
