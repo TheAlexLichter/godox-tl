@@ -35,6 +35,7 @@ const setupController = async (
       provisionerAddress: 1,
       nodeAddress: 2,
       sequenceNumber: 0,
+      sequenceDirectory: join(dir, "sequences"),
     }),
   );
 

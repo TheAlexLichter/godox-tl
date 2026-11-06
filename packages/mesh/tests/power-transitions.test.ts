@@ -124,7 +124,9 @@ const activeCommands = [
 
 test("power transitions repeat with distinct sequences before restoring every active mode", async () => {
   const statePath = join(dir, "state.json");
-  await Effect.runPromise(saveMeshState(statePath, initialState));
+  await Effect.runPromise(
+    saveMeshState(statePath, { ...initialState, sequenceDirectory: join(dir, "sequences") }),
+  );
   const noble = new PowerNoble();
   __setNobleForTesting(noble);
   const controller = makeMeshController({ address: "AA:BB:CC:DD:EE:FF", statePath });
@@ -156,7 +158,9 @@ test("power transitions repeat with distinct sequences before restoring every ac
 
 test("opening a new writer wakes again after an uncached send", async () => {
   const statePath = join(dir, "state.json");
-  await Effect.runPromise(saveMeshState(statePath, initialState));
+  await Effect.runPromise(
+    saveMeshState(statePath, { ...initialState, sequenceDirectory: join(dir, "sequences") }),
+  );
   const noble = new PowerNoble();
   __setNobleForTesting(noble);
   const controller = makeMeshController({
@@ -177,7 +181,9 @@ test("opening a new writer wakes again after an uncached send", async () => {
 
 test("a failed send leaves power unknown for the next attempt", async () => {
   const statePath = join(dir, "state.json");
-  await Effect.runPromise(saveMeshState(statePath, initialState));
+  await Effect.runPromise(
+    saveMeshState(statePath, { ...initialState, sequenceDirectory: join(dir, "sequences") }),
+  );
   let failSettings = true;
   const noble = new PowerNoble((frame) => {
     if (failSettings && frame.payload[0] !== 0xfe) throw new Error("settings write failed");
