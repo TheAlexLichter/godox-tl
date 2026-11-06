@@ -362,3 +362,44 @@ test("failed cleanup fences replacement until a later native disconnect complete
   expect(closeAttempts).toBe(3);
   expect(connect).toHaveBeenCalledTimes(2);
 });
+
+test("a timed-out write holds the source lease until disconnect cleanup finishes", async () => {
+  const firstWrite = deferred();
+  const closeStarted = deferred();
+  const closeReleased = deferred();
+  const secondConnected = deferred();
+  const secondWrite = vi.fn(() => Effect.void);
+  const first = {
+    ...makeWriter(() =>
+      Effect.sync(() => firstWrite.resolve()).pipe(Effect.zipRight(Effect.never)),
+    ),
+    close: vi.fn<ProxyWriterConnection["close"]>(() =>
+      Effect.sync(() => closeStarted.resolve()).pipe(
+        Effect.zipRight(Effect.promise(() => closeReleased.promise)),
+      ),
+    ),
+  };
+  connect.mockReturnValueOnce(Effect.succeed(first)).mockReturnValueOnce(
+    Effect.sync(() => {
+      secondConnected.resolve();
+      return makeWriter(secondWrite);
+    }),
+  );
+  const interrupted = makeMeshController({ address: "test-light", statePath, sendTimeoutMs: 500 });
+  const next = makeMeshController({ address: "test-light", statePath, sendTimeoutMs: 5000 });
+  const interruptedSend = Effect.runPromiseExit(interrupted.send(command));
+  await firstWrite.promise;
+  await closeStarted.promise;
+
+  const nextSend = Effect.runPromiseExit(next.send(command));
+  await secondConnected.promise;
+  await Effect.runPromise(Effect.sleep("25 millis"));
+  expect(secondWrite).not.toHaveBeenCalled();
+  closeReleased.resolve();
+
+  const [failure, success] = await Promise.all([interruptedSend, nextSend]);
+  expect(failure._tag).toBe("Failure");
+  expect(success._tag).toBe("Success");
+  expect(secondWrite).toHaveBeenCalledTimes(3);
+  expect(first.close).toHaveBeenCalledTimes(1);
+});
