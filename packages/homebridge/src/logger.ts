@@ -50,7 +50,15 @@ const makeHomebridgeEffectLogger = (hbLog: HomebridgeLogger) =>
  * printed for the current Homebridge log mode. */
 export const homebridgeLoggerLayer = (hbLog: HomebridgeLogger): Layer.Layer<never> =>
   Layer.merge(
-    EffectLogger.layer([makeHomebridgeEffectLogger(hbLog)]),
+    Layer.effect(
+      References.CurrentLoggers,
+      Effect.gen(function* () {
+        const loggers = new Set(yield* References.CurrentLoggers);
+        loggers.delete(EffectLogger.defaultLogger);
+        loggers.add(makeHomebridgeEffectLogger(hbLog));
+        return loggers;
+      }),
+    ),
     Layer.succeed(References.MinimumLogLevel, "Debug"),
   );
 

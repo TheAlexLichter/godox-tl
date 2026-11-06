@@ -107,6 +107,7 @@ const sendAndAwait = (params: SendAndAwaitParams): Effect.Effect<void, ConfigErr
         ivIndex: opts.ivIndex,
         timeoutMs: opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,
       }),
+      { startImmediately: true },
     );
 
     yield* conn.write(frame);
