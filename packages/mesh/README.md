@@ -116,7 +116,17 @@ await Effect.runPromise(
     }),
   ),
 );
+await Effect.runPromise(light.close());
 ```
+
+Call `light.close()` when a direct controller is no longer needed. It rejects
+queued and future sends, interrupts active work, and waits for the existing
+bounded disconnect cleanup without sending lighting commands.
+
+`makeMeshControllerScoped(options)` registers this cleanup in the caller's
+Effect scope. `makeNodeMeshLayer` also closes its controller when the layer's
+scope ends. Homebridge disposes controllers and cancels pending debounces and
+discovery during shutdown.
 
 ### Effect-style use
 

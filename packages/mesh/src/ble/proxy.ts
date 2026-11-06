@@ -7,7 +7,7 @@
 // top of the controller wraps the entire lifetime.
 
 import type { Characteristic, Peripheral } from "@stoprocent/noble";
-import { Queue, Duration, Effect, type Scope, Stream } from "effect";
+import { Queue, Duration, Effect, Exit, type Scope, Stream } from "effect";
 import { matchAddress, normalizeAddress } from "./address.ts";
 import { BleError } from "./errors.ts";
 import { getNoble, type NobleLike, type PeripheralLike, withNobleOperation } from "./noble.ts";
@@ -779,6 +779,7 @@ export const connectProxy = (
 export const connectProxyWriter = (
   address: string,
   options: ProxyConnectOptions = {},
+  onReady?: (connection: ProxyWriterConnection) => void,
 ): Effect.Effect<ProxyWriterConnection, BleError> =>
   withNobleOperation(
     Effect.gen(function* () {
@@ -798,37 +799,42 @@ export const connectProxyWriter = (
           closed = true;
         });
 
-      yield* Effect.logDebug(`[ble] connected; discovering Data In`);
-      const dataIn = yield* withBleTimeout(
-        discoverProxyDataIn(peripheral, opened.direct ? 0 : POST_CONNECT_SETTLE_MS),
-        "discoverDataIn",
-      ).pipe(Effect.tapError(() => close()));
-      yield* Effect.logDebug(`[ble] Data In ready`);
+      return yield* Effect.gen(function* () {
+        yield* Effect.logDebug(`[ble] connected; discovering Data In`);
+        const dataIn = yield* withBleTimeout(
+          discoverProxyDataIn(peripheral, opened.direct ? 0 : POST_CONNECT_SETTLE_MS),
+          "discoverDataIn",
+        );
+        yield* Effect.logDebug(`[ble] Data In ready`);
 
-      const supportsWithoutResponse = dataIn.properties.includes("writeWithoutResponse");
+        const supportsWithoutResponse = dataIn.properties.includes("writeWithoutResponse");
 
-      const write = (pdu: Uint8Array): Effect.Effect<void, BleError> =>
-        Effect.tryPromise({
-          try: () =>
-            dataIn.writeAsync(
-              Buffer.from(pdu.buffer, pdu.byteOffset, pdu.byteLength),
-              supportsWithoutResponse,
-            ),
-          catch: (cause) =>
-            new BleError({
-              cause,
-              message: `Failed to write ${pdu.byteLength} bytes to Mesh Proxy Data In (${MESH_PROXY_DATA_IN_UUID})`,
-            }),
-        });
+        const write = (pdu: Uint8Array): Effect.Effect<void, BleError> =>
+          Effect.tryPromise({
+            try: () =>
+              dataIn.writeAsync(
+                Buffer.from(pdu.buffer, pdu.byteOffset, pdu.byteLength),
+                supportsWithoutResponse,
+              ),
+            catch: (cause) =>
+              new BleError({
+                cause,
+                message: `Failed to write ${pdu.byteLength} bytes to Mesh Proxy Data In (${MESH_PROXY_DATA_IN_UUID})`,
+              }),
+          });
 
-      return {
-        address,
-        write,
-        close,
-        isConnected: () =>
-          !closed &&
-          ownsConnection(peripheral, opened.generation) &&
-          peripheral.state === "connected",
-      } satisfies ProxyWriterConnection;
+        const connection = {
+          address,
+          write,
+          close,
+          isConnected: () =>
+            !closed &&
+            ownsConnection(peripheral, opened.generation) &&
+            peripheral.state === "connected",
+        } satisfies ProxyWriterConnection;
+        // Publish ownership before returning across an interruptible boundary.
+        onReady?.(connection);
+        return connection;
+      }).pipe(Effect.onExit((exit) => (Exit.isFailure(exit) ? close() : Effect.void)));
     }),
   );

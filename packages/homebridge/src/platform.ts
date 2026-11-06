@@ -29,6 +29,10 @@ export class GodoxTLPlatform implements DynamicPlatformPlugin {
   private readonly config: ResolvedConfig;
   private readonly loggerLayer: Layer.Layer<never>;
   private scanTimer: NodeJS.Timeout | undefined;
+  private stopped = false;
+  private shutdownResult: Promise<void> | undefined;
+  private readonly accessoryDisposals = new Set<Promise<void>>();
+  private readonly discoveryTasks = new Map<AbortController, Promise<unknown>>();
 
   constructor(
     public readonly log: Logger,
@@ -44,21 +48,22 @@ export class GodoxTLPlatform implements DynamicPlatformPlugin {
       void this.didFinishLaunching();
     });
     this.api.on("shutdown", () => {
-      if (this.scanTimer) clearInterval(this.scanTimer);
+      void this.shutdown();
     });
   }
 
   /** Called once per cached accessory at startup, before didFinishLaunching. */
   configureAccessory(accessory: PlatformAccessory): void {
-    this.accessoriesByUUID.set(accessory.UUID, { accessory });
+    if (!this.stopped) this.accessoriesByUUID.set(accessory.UUID, { accessory });
   }
 
   private async didFinishLaunching(): Promise<void> {
+    if (this.stopped) return;
     try {
-      const discovered = await Effect.runPromise(
+      const discovered = await this.runDiscovery(
         discoverKnownLights(this.config).pipe(Effect.provide(this.loggerLayer)),
       );
-      const startup = await Effect.runPromise(
+      const startup = await this.runDiscovery(
         runStartupScan(this.config, discovered).pipe(Effect.provide(this.loggerLayer)),
       );
       const entries = startup.entries;
@@ -78,8 +83,9 @@ export class GodoxTLPlatform implements DynamicPlatformPlugin {
       const proxyFallbacks = await this.proxyFallbacksFor(entries);
       this.materializeAccessories(entries, true, proxyFallbacks);
     } catch (err) {
-      this.log.error("Failed to load registry:", err);
+      if (!this.stopped) this.log.error("Failed to load registry:", err);
     }
+    if (this.stopped) return;
     if (this.config.autoProvision) {
       this.scanTimer = setInterval(() => {
         void this.scanCycle();
@@ -95,14 +101,15 @@ export class GodoxTLPlatform implements DynamicPlatformPlugin {
   }
 
   private async scanCycle(): Promise<void> {
+    if (this.stopped) return;
     const knownEntries = [...this.accessoriesByUUID.values()]
       .map((c) => c.light?.entry)
       .filter((entry): entry is LightEntry => Boolean(entry));
     try {
-      const newEntries = await Effect.runPromise(
+      const newEntries = await this.runDiscovery(
         runDiscoveryCycle(this.config, knownEntries).pipe(Effect.provide(this.loggerLayer)),
       );
-      if (newEntries.length === 0) return;
+      if (this.stopped || newEntries.length === 0) return;
       this.log.info(
         `Auto-provisioned ${newEntries.length} new light(s): ${newEntries
           .map((e) => `${e.entry.name}@${e.entry.address}`)
@@ -110,8 +117,52 @@ export class GodoxTLPlatform implements DynamicPlatformPlugin {
       );
       this.materializeAccessories(newEntries.map((r) => r.entry));
     } catch (err) {
-      this.log.warn("Scan cycle failed:", err);
+      if (!this.stopped) this.log.warn("Scan cycle failed:", err);
     }
+  }
+
+  private runDiscovery<A, E>(effect: Effect.Effect<A, E>): Promise<A> {
+    if (this.stopped) return Promise.reject(new Error("Godox platform is shut down"));
+    const abort = new AbortController();
+    const result = Effect.runPromise(effect, { signal: abort.signal }).finally(() => {
+      this.discoveryTasks.delete(abort);
+    });
+    this.discoveryTasks.set(abort, result);
+    return result;
+  }
+
+  /** Stop discovery first, then drain all materialized controllers. */
+  shutdown(): Promise<void> {
+    if (!this.shutdownResult) {
+      this.stopped = true;
+      if (this.scanTimer) clearInterval(this.scanTimer);
+      this.scanTimer = undefined;
+      for (const abort of this.discoveryTasks.keys()) abort.abort();
+      // dispose sets each accessory's gate synchronously before awaiting cleanup.
+      for (const { light } of this.accessoriesByUUID.values()) {
+        if (light) void this.disposeLight(light);
+      }
+      this.shutdownResult = Promise.allSettled([
+        ...this.discoveryTasks.values(),
+        ...this.accessoryDisposals,
+      ]).then(() => {});
+    }
+    return this.shutdownResult;
+  }
+
+  private disposeLight(light: GodoxLightAccessory): Promise<void> {
+    const result = light.dispose();
+    this.accessoryDisposals.add(result);
+    void result.then(
+      () => {
+        this.accessoryDisposals.delete(result);
+      },
+      (error: unknown) => {
+        this.accessoryDisposals.delete(result);
+        this.log.warn("Accessory cleanup failed:", error);
+      },
+    );
+    return result;
   }
 
   private uuidForEntry(entry: LightEntry): string {
@@ -123,6 +174,7 @@ export class GodoxTLPlatform implements DynamicPlatformPlugin {
   ): Promise<ReadonlyMap<string, ReadonlyArray<string>>> {
     const groups = new Map<string, LightEntry[]>();
     for (const entry of entries) {
+      if (this.stopped) break;
       try {
         const state = await Effect.runPromise(loadMeshState(entry.statePath));
         const key = `${this.hex(state.networkKey)}:${this.hex(state.appKey)}`;
@@ -161,6 +213,7 @@ export class GodoxTLPlatform implements DynamicPlatformPlugin {
     reconcile = false,
     proxyFallbacks: ReadonlyMap<string, ReadonlyArray<string>> = new Map(),
   ): void {
+    if (this.stopped) return;
     const newOnes: PlatformAccessory[] = [];
     const seenUUIDs = new Set<string>();
     for (const entry of entries) {
@@ -209,6 +262,7 @@ export class GodoxTLPlatform implements DynamicPlatformPlugin {
       const stale: PlatformAccessory[] = [];
       for (const [uuid, cached] of this.accessoriesByUUID) {
         if (seenUUIDs.has(uuid)) continue;
+        if (cached.light) void this.disposeLight(cached.light);
         stale.push(cached.accessory);
         this.accessoriesByUUID.delete(uuid);
       }

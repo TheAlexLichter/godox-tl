@@ -23,6 +23,13 @@ export class Debouncer<T> {
     }, this.delayMs);
   }
 
+  /** Discard pending work without flushing it. */
+  cancel(): void {
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = undefined;
+    this.pending = undefined;
+  }
+
   /** Force the pending value to fire now. */
   flushNow(): void {
     if (this.timer) {

@@ -37,3 +37,16 @@ test("Debouncer.flushNow is a no-op when nothing pending", () => {
   d.flushNow();
   expect(seen).toEqual([]);
 });
+
+test("Debouncer.cancel discards pending work and still permits later schedules", async () => {
+  const seen: number[] = [];
+  const d = new Debouncer<number>(10, (v) => seen.push(v));
+  d.schedule(1);
+  d.cancel();
+  d.flushNow();
+  await delay(30);
+  expect(seen).toEqual([]);
+  d.schedule(2);
+  d.flushNow();
+  expect(seen).toEqual([2]);
+});
