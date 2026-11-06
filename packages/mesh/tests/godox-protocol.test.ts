@@ -110,6 +110,11 @@ test("encodeSet rejects out-of-range brightness", () => {
 });
 
 test("encodeSet rejects out-of-range kelvin", () => {
-  expect(() => encodeSet(50, 2799)).toThrow(RangeError);
+  expect(() => encodeSet(50, 2699)).toThrow(RangeError);
   expect(() => encodeSet(50, 6501)).toThrow(RangeError);
+});
+
+test("encodeSet supports both TL30 CCT boundaries", () => {
+  expect(Array.from(encodeSet(50, 2700).subarray(0, 7))).toEqual([0xf0, 50, 27, 50, 0, 0, 0]);
+  expect(encodeSet(50, 6500)[2]).toBe(65);
 });

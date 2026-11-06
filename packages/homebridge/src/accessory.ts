@@ -8,11 +8,11 @@ import { homebridgeLoggerLayer } from "./logger.ts";
 
 const { Cct, Fx, Hsi, Off, Rgbw, byte, hue, kelvin, pct, sat } = Domain;
 
-const KELVIN_MIN = 2800;
+const KELVIN_MIN = 2700;
 const KELVIN_MAX = 6500;
 // HomeKit ColorTemperature is in mireds; mireds = 1_000_000 / kelvin.
 const MIRED_MIN = Math.round(1_000_000 / KELVIN_MAX); // ≈154
-const MIRED_MAX = Math.round(1_000_000 / KELVIN_MIN); // ≈357
+const MIRED_MAX = Math.round(1_000_000 / KELVIN_MIN); // ≈370
 // HAP's default Lightbulb ColorTemperature range is wider than the Godox
 // hardware range. Keep HomeKit's range here so cached/adaptive values such as
 // 140 mireds are accepted, then clamp before encoding the Godox command.

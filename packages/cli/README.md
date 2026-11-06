@@ -35,7 +35,7 @@ godox scan [--timeout 10]
 godox lights
 godox provision <ble-address> --name <name>
 godox rebind <light>
-godox set <light> --brightness 0..100 --cct 2800..6500
+godox set <light> --brightness 0..100 --cct 2700..6500
 godox hsi <light> --brightness 0..100 --hue 0..360 --saturation 0..100
 godox rgbw <light> --brightness 0..100 [--red 0..255] [--green 0..255] [--blue 0..255] [--white 0..255]
 godox fx <light> --brightness 0..100 --effect 0..255 [--level 0..255] [--filter 0..255]

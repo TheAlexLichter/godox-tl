@@ -19,7 +19,7 @@ pnpm add @godox-tl/core
 ## What's in here
 
 - **Domain** (`Domain.*`) — branded types (`Percent`, `Hue`, `Saturation`,
-  `Kelvin`, `Byte`) + a tagged `LightCommand` union (`Off`, `Cct`, `Hsi`,
+  `Kelvin` (2700–6500K), `Byte`) + a tagged `LightCommand` union (`Off`, `Cct`, `Hsi`,
   `Rgbw`, `Fx`) + smart constructors (`pct`, `kelvin`, …).
 - **`LightController`** — an Effect `Context.Tag` whose service is
   `{ send(cmd): Effect.Effect<void, TransportError | TransportUnsupportedError> }`.
