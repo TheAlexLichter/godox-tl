@@ -174,6 +174,8 @@ export class GodoxTLPlatform implements DynamicPlatformPlugin {
             fxPresets: this.config.fxPresets,
             rgbwPresets: this.config.rgbwPresets,
             mesh: {
+              sequenceDirectory: this.config.sequenceDirectory,
+              statePaths: entries.map((light) => light.statePath),
               findPeripheralTimeoutMs: this.config.bleFindTimeoutMs,
               proxyAddresses: proxyFallbacks.get(normalizeAddress(entry.address)) ?? [],
               sendTimeoutMs: this.config.bleSendTimeoutMs,
@@ -189,6 +191,8 @@ export class GodoxTLPlatform implements DynamicPlatformPlugin {
         fxPresets: this.config.fxPresets,
         rgbwPresets: this.config.rgbwPresets,
         mesh: {
+          sequenceDirectory: this.config.sequenceDirectory,
+          statePaths: entries.map((light) => light.statePath),
           findPeripheralTimeoutMs: this.config.bleFindTimeoutMs,
           proxyAddresses: proxyFallbacks.get(normalizeAddress(entry.address)) ?? [],
           sendTimeoutMs: this.config.bleSendTimeoutMs,

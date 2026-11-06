@@ -80,7 +80,10 @@ By default, Homebridge stores the registry at
 `<homebridge-storage>/godox-tl/registry.json`; per-light mesh state files live
 under `<homebridge-storage>/godox-tl/states/`. To share a CLI registry, set
 `registryPath` to the CLI registry and make sure the Homebridge user can write
-the registry and state files.
+the registry, state files, and shared sequence directory. Mesh counters default
+to `sequences/` beside the registry; the selected directory is persisted in each
+light state so CLI commands using those states share the same counters. All
+controllers must run on the same host and use a local filesystem.
 
 ## Configuration
 
@@ -97,6 +100,7 @@ settings form. The platform alias is:
 | ------------------------ | --------------------- | -------------------------------------------------------------------------------------------------------------- |
 | `name`                   | `"Godox TL"`          | Platform name shown in Homebridge logs.                                                                        |
 | `registryPath`           | Homebridge storage    | Registry JSON path. Leave empty to store registry and state files under the Homebridge storage directory.      |
+| `sequenceDirectory`      | Beside registry       | Shared mesh counter directory. Existing light states retain their selected store.                              |
 | `discoveryMode`          | `"merge"`             | `"registry"`, `"manual"`, or `"merge"` (registry plus manual overrides by name).                               |
 | `autoProvision`          | `false`               | Continuously scan and provision matching factory-reset lights after startup.                                   |
 | `startupScan`            | `true`                | Run one BLE scan when Homebridge starts.                                                                       |

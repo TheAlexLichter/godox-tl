@@ -195,6 +195,8 @@ const provisionCandidates = (
       const outcome = yield* Effect.scoped(
         Effect.gen(function* () {
           const r = yield* provisionAndRebind(dev.address, {
+            sequenceDirectory: config.sequenceDirectory,
+            statePaths: knownEntries.map((entry) => entry.statePath),
             appKey: plan.appKey,
             networkKey: plan.networkKey,
             nodeAddress: nextNodeAddress,

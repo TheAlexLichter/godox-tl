@@ -90,3 +90,6 @@ export { loadMeshState, MeshStateError, saveMeshState } from "./state.ts";
 export type { MeshState } from "./state.ts";
 export { provisionAndRebind } from "./integration.ts";
 export type { ProvisionAndRebindOptions, ProvisionAndRebindResult } from "./integration.ts";
+
+export { reserveMeshSequences, withMeshSequenceReservation } from "./sequences.ts";
+export type { SequenceOptions, SequenceReservation } from "./sequences.ts";

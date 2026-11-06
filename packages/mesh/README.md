@@ -142,6 +142,34 @@ const program = Effect.gen(function* () {
 await Effect.runPromise(program);
 ```
 
+## Shared mesh sequence counters
+
+Sequence numbers belong to a network/source pair, not an individual light.
+Control and config/rebind messages reserve from the same durable counter before
+writing BLE data, and hold a process lock through transmission. A crash consumes
+its reserved range; it never makes that range available again.
+
+Homebridge defaults to `sequences/` beside its registry. Other callers default
+to `$GODOX_TL_SEQUENCE_DIRECTORY` or `~/.config/godox-tl/sequences` (respecting
+`XDG_CONFIG_HOME`). Set `sequenceDirectory` explicitly for isolated tests and
+dry runs. State files gain an optional `sequence_directory` field, and adjacent
+store pointers let CLI and Homebridge converge even on simultaneous first use.
+Existing state JSON fields remain compatible.
+
+Legacy migration takes the highest counter from registered states and sibling
+JSON state files with the same network/source. Library callers with states in
+other directories should supply every known `statePaths` entry, or explicitly
+share one sequence directory across all controllers. Never delete or restore
+an older sequence store: the lights may have already accepted higher numbers.
+
+To move a store, stop all controllers, then make one reservation with the new
+`sequenceDirectory` and `migrateSequenceDirectory: true`, supplying all known
+state paths. Keep the old store until migration succeeds. Preserve the counter store
+and selected absolute paths when moving to another host, or migrate after copying. Locks support processes
+on one host using a local filesystem; network filesystems require a distributed
+lock. Live owners are never expired, and lock acquisition fails after 10 seconds
+by default (`lockTimeoutMs`) or when the enclosing Effect is interrupted.
+
 ## Tests
 
 ```bash

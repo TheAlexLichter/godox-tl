@@ -129,8 +129,9 @@ added as HomeKit accessories with the `nameTemplate` (default
 `godox-{shortAddr}`).
 
 Set handlers are debounced 100 ms so HomeKit slider drags don't flood the
-mesh. Mesh sends are serialized per controller so concurrent HomeKit updates
-reserve sequence numbers in order.
+mesh. All lights sharing a mesh network and source address reserve sequence
+numbers from one persistent counter. Homebridge and CLI processes serialize
+reservations and transmission through the same local filesystem lock.
 
 Auto-provision scan failures are surfaced in the Homebridge log and retried on
 the next scan interval; they are not treated as an empty scan result.

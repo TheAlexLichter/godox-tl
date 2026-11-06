@@ -16,8 +16,9 @@
 
 import { Effect, Scope } from "effect";
 import { connectProxy } from "../ble/proxy.ts";
-import type { BleError } from "../ble/errors.ts";
+import { BleError } from "../ble/errors.ts";
 import type { ProxyConnection } from "../ble/types.ts";
+import { withMeshSequenceReservation, type SequenceOptions } from "../sequences.ts";
 import { encodeDeviceKeyFrame } from "../pdu/accessFrame.ts";
 import { ConfigError, type ConfigStage } from "./errors.ts";
 import {
@@ -37,7 +38,7 @@ import { awaitConfigStatus } from "./receiver.ts";
 const DEFAULT_TTL = 10;
 const DEFAULT_TIMEOUT_MS = 5_000;
 
-export interface RebindOptions {
+export interface RebindOptions extends SequenceOptions {
   readonly networkKey: Uint8Array;
   readonly appKey: Uint8Array;
   readonly deviceKey: Uint8Array;
@@ -54,6 +55,7 @@ export interface RebindOptions {
 
 export interface RebindResult {
   readonly sequenceNumber: number;
+  readonly sequenceDirectory: string;
 }
 
 const concatBytes = (a: Uint8Array, b: Uint8Array): Uint8Array => {
@@ -153,35 +155,52 @@ export const rebindOverConnection = (
     const netKeyIndex = opts.netKeyIndex ?? 0;
     const appKeyIndex = opts.appKeyIndex ?? 0;
     const modelIdentifier = opts.modelIdentifier ?? GODOX_VENDOR_MODEL;
-    let seq = opts.sequenceNumber ?? 0;
-
-    // ---- 1. Config AppKey Add ------------------------------------------
-    yield* sendAndAwait({
-      conn,
-      stage: "appKeyAdd",
-      opcode: OPCODE_CONFIG_APP_KEY_ADD,
-      payload: buildAppKeyAdd({ netKeyIndex, appKeyIndex, appKey: opts.appKey }),
-      expectedStatusOpcode: OPCODE_CONFIG_APP_KEY_STATUS,
-      seq,
+    return yield* withMeshSequenceReservation(
+      { ...opts, sequenceNumber: opts.sequenceNumber ?? 0 },
+      2,
       opts,
-    });
-    seq += 1;
+      (reservation) =>
+        Effect.gen(function* () {
+          let seq = reservation.sequenceNumber;
 
-    // ---- 2. Config Model App Bind --------------------------------------
-    yield* sendAndAwait({
-      conn,
-      stage: "modelAppBind",
-      opcode: OPCODE_CONFIG_MODEL_APP_BIND,
-      payload: buildModelAppBind({
-        elementAddress: opts.nodeAddress,
-        appKeyIndex,
-        modelIdentifier,
-      }),
-      expectedStatusOpcode: OPCODE_CONFIG_MODEL_APP_STATUS,
-      seq,
-      opts,
-    });
-    seq += 1;
+          // ---- 1. Config AppKey Add ------------------------------------------
+          yield* sendAndAwait({
+            conn,
+            stage: "appKeyAdd",
+            opcode: OPCODE_CONFIG_APP_KEY_ADD,
+            payload: buildAppKeyAdd({ netKeyIndex, appKeyIndex, appKey: opts.appKey }),
+            expectedStatusOpcode: OPCODE_CONFIG_APP_KEY_STATUS,
+            seq,
+            opts,
+          });
+          seq += 1;
 
-    return { sequenceNumber: seq } satisfies RebindResult;
+          // ---- 2. Config Model App Bind --------------------------------------
+          yield* sendAndAwait({
+            conn,
+            stage: "modelAppBind",
+            opcode: OPCODE_CONFIG_MODEL_APP_BIND,
+            payload: buildModelAppBind({
+              elementAddress: opts.nodeAddress,
+              appKeyIndex,
+              modelIdentifier,
+            }),
+            expectedStatusOpcode: OPCODE_CONFIG_MODEL_APP_STATUS,
+            seq,
+            opts,
+          });
+          seq += 1;
+
+          return {
+            sequenceNumber: seq,
+            sequenceDirectory: reservation.sequenceDirectory,
+          } satisfies RebindResult;
+        }),
+    ).pipe(
+      Effect.mapError((cause) =>
+        cause instanceof ConfigError || cause instanceof BleError
+          ? cause
+          : new ConfigError({ stage: "appKeyAdd", message: cause.message, cause }),
+      ),
+    );
   });
