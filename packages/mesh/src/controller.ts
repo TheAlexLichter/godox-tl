@@ -3,7 +3,7 @@
 // Mesh Proxy connection, and persists the bumped sequence number.
 
 import { Domain, LightController, TransportError, TransportUnsupportedError } from "@godox-tl/core";
-import { Duration, Effect, Match, Runtime } from "effect";
+import { Duration, Effect, Exit, Match, Runtime } from "effect";
 import { connectProxyWriter } from "./ble/proxy.ts";
 import { BleError } from "./ble/errors.ts";
 import type { ProxyWriterConnection } from "./ble/types.ts";
@@ -36,7 +36,7 @@ export interface MeshControllerOptions {
   readonly findPeripheralTimeoutMs?: number;
   /** Same-mesh BLE proxy addresses that can be used when the target peripheral is not visible. */
   readonly proxyAddresses?: ReadonlyArray<string>;
-  /** Hard timeout for one queued send, including scan/connect/discovery/write. Defaults to about 70s. */
+  /** Deadline shared by send attempts, including connection and writes. Failure cleanup may take up to 6s more. */
   readonly sendTimeoutMs?: number;
   /** Collapse queued in-flight sends to the newest command. Defaults to true for persistent connections. */
   readonly coalesce?: boolean;
@@ -97,6 +97,14 @@ interface PendingSend {
   readonly runtime: Runtime.Runtime<never>;
 }
 
+interface PendingWriterClose {
+  readonly writer: ProxyWriterConnection;
+  readonly result: Promise<Exit.Exit<void, BleError>>;
+  settled: boolean;
+}
+
+const WRITER_CLOSE_ATTEMPT_TIMEOUT_MS = 3_000;
+
 const transportError = (address: string, cause: unknown): TransportError =>
   new TransportError({
     cause,
@@ -125,6 +133,7 @@ export const makeMeshController = (options: MeshControllerOptions): LightControl
   let inFlight: Promise<void> | undefined;
   let pending: ReadonlyArray<PendingSend> = [];
   let powerState: "unknown" | "on" | "off" = "unknown";
+  let closing: PendingWriterClose | undefined;
 
   const clearIdleTimer = (): void => {
     if (!idleTimer) return;
@@ -132,33 +141,83 @@ export const makeMeshController = (options: MeshControllerOptions): LightControl
     idleTimer = undefined;
   };
 
-  const closeWriter = (): Effect.Effect<void> =>
+  const awaitWriterClose = (): Effect.Effect<void, BleError> =>
     Effect.suspend(() => {
+      const current = closing;
+      if (!current) return Effect.void;
+      return Effect.promise(() => current.result).pipe(
+        Effect.flatMap((result) =>
+          Exit.isSuccess(result)
+            ? Effect.void
+            : Effect.fail(
+                new BleError({
+                  message:
+                    "Previous BLE writer could not be closed; replacement connection blocked",
+                  cause: result.cause,
+                }),
+              ),
+        ),
+      );
+    });
+
+  const closeWriter = (): Effect.Effect<void> =>
+    Effect.gen(function* () {
       clearIdleTimer();
-      const current = writer;
+      // A failed cleanup stays fenced until a later cleanup succeeds. Starting
+      // another connection while its native disconnect is pending can close the
+      // new link, because Noble can reuse the same peripheral object.
+      const current = writer ?? (closing?.settled ? closing.writer : undefined);
       writer = undefined;
       powerState = "unknown";
-      if (!current) return Effect.void;
-      return current
-        .close()
-        .pipe(
-          Effect.catchAllCause(() => current.close().pipe(Effect.catchAllCause(() => Effect.void))),
+      if (current) {
+        const runtime = yield* Effect.runtime<never>();
+        const attempt = Effect.suspend(() => current.close()).pipe(
+          Effect.timeoutFail({
+            duration: Duration.millis(WRITER_CLOSE_ATTEMPT_TIMEOUT_MS),
+            onTimeout: () => new BleError({ message: "BLE writer cleanup timed out after 3000ms" }),
+          }),
         );
+        // Cleanup outlives an interrupted waiter, but the fence keeps every
+        // replacement connection behind both bounded close attempts.
+        const cleanup: PendingWriterClose = {
+          writer: current,
+          result: Runtime.runPromiseExit(runtime)(
+            attempt.pipe(Effect.catchAllCause(() => attempt)),
+          ),
+          settled: false,
+        };
+        closing = cleanup;
+        void cleanup.result.then((result) => {
+          cleanup.settled = true;
+          if (Exit.isSuccess(result) && closing === cleanup) closing = undefined;
+        });
+      }
+      yield* awaitWriterClose().pipe(Effect.catchAllCause(() => Effect.void));
     });
 
   const scheduleIdleClose = (runtime: Runtime.Runtime<never>): void => {
     clearIdleTimer();
+    const scheduledWriter = writer;
+    const closeScheduledWriter = Effect.suspend(() =>
+      writer === scheduledWriter ? closeWriter() : Effect.void,
+    );
     if (!persistent || idleMs === 0) {
-      void Runtime.runPromise(runtime)(closeWriter());
+      void Runtime.runPromise(runtime)(closeScheduledWriter);
       return;
     }
     idleTimer = setTimeout(() => {
-      void Runtime.runPromise(runtime)(closeWriter());
+      void Runtime.runPromise(runtime)(closeScheduledWriter);
     }, idleMs);
     idleTimer.unref?.();
   };
 
   const writerForSend = (): Effect.Effect<ProxyWriterConnection, TransportError> => {
+    if (closing) {
+      return awaitWriterClose().pipe(
+        Effect.mapError((error) => transportError(options.address, error)),
+        Effect.zipRight(Effect.suspend(writerForSend)),
+      );
+    }
     if (writer && persistent) {
       if (writer.isConnected?.() === false) {
         return Effect.logDebug(`[mesh] discarding disconnected writer for ${options.address}`).pipe(

@@ -273,6 +273,7 @@ const discoverProxyDataIn = (
  */
 const STEP_TIMEOUT_MS = 15_000;
 const DISCONNECT_TIMEOUT_MS = 3_000;
+const pendingDisconnects = new WeakMap<Peripheral, Promise<void>>();
 
 const withBleTimeout = <A>(
   effect: Effect.Effect<A, BleError>,
@@ -288,16 +289,30 @@ const withBleTimeout = <A>(
 const disconnectPeripheral = (peripheral: Peripheral): Effect.Effect<void, BleError> =>
   Effect.tryPromise({
     try: async () => {
-      if (peripheral.state === "connecting") {
-        peripheral.cancelConnect();
-        return;
+      let pending = pendingDisconnects.get(peripheral);
+      if (!pending) {
+        if (peripheral.state === "connecting") {
+          peripheral.cancelConnect();
+          return;
+        }
+        if (peripheral.state === "disconnected" || peripheral.state === "error") return;
+
+        // A bounded wait must not abandon the native disconnect. Later close
+        // attempts join it rather than starting another disconnect that could
+        // finish after the same peripheral has been reconnected.
+        pending = Promise.resolve().then(() => peripheral.disconnectAsync());
+        pendingDisconnects.set(peripheral, pending);
+        const current = pending;
+        const clear = (): void => {
+          if (pendingDisconnects.get(peripheral) === current) pendingDisconnects.delete(peripheral);
+        };
+        void pending.then(clear, clear);
       }
-      if (peripheral.state === "disconnected" || peripheral.state === "error") return;
 
       let timer: NodeJS.Timeout | undefined;
       try {
         const disconnected = await Promise.race([
-          peripheral.disconnectAsync().then(() => true),
+          pending.then(() => true),
           new Promise<boolean>((resolve) => {
             timer = setTimeout(() => resolve(false), DISCONNECT_TIMEOUT_MS);
           }),

@@ -22,7 +22,11 @@ queued/coalesced sends, state-file helpers, auto-provision integration, and
 additional command encoders used by this repo.
 
 Light-control sends retry a BLE failure once on a fresh connection, within the
-same overall `sendTimeoutMs` deadline. The retry reserves fresh sequence numbers.
+same `sendTimeoutMs` attempt deadline. The retry reserves fresh sequence numbers.
+Failure cleanup can take up to six additional seconds for two bounded disconnect
+attempts. Replacement connections wait for cleanup to succeed, including cleanup
+started by an idle timer, so a late disconnect cannot close a replacement link.
+If cleanup fails, the retired writer remains fenced until a later cleanup succeeds.
 Disconnected cached writers are replaced before sending; state-file failures
 are reported directly without retrying the Bluetooth connection.
 

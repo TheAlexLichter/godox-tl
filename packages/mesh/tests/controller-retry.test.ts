@@ -2,7 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Domain } from "@godox-tl/core";
-import { Effect } from "effect";
+import { Cause, Effect } from "effect";
 import { afterEach, beforeEach, expect, test, vi } from "vite-plus/test";
 import { BleError } from "../src/ble/errors.ts";
 import { connectProxyWriter } from "../src/ble/proxy.ts";
@@ -202,4 +202,161 @@ test("state-file failures do not trigger a BLE reconnect retry", async () => {
   expect(result._tag).toBe("Failure");
   expect(connect.mock.calls.length).toBeLessThanOrEqual(1);
   expect(writeCount).toBe(0);
+});
+
+const deferred = () => {
+  let complete: (() => void) | undefined;
+  const promise = new Promise<void>((resolve) => {
+    complete = resolve;
+  });
+  return { promise, resolve: () => complete?.() };
+};
+
+test("a new send joins idle cleanup before replacing the same peripheral", async () => {
+  vi.useFakeTimers();
+  const firstWrite = deferred();
+  const closeStarted = deferred();
+  const closeReleased = deferred();
+  const replacementWrite = deferred();
+  const events: string[] = [];
+  const first = {
+    ...makeWriter(() => Effect.sync(() => firstWrite.resolve())),
+    close: vi.fn<ProxyWriterConnection["close"]>(() =>
+      Effect.sync(() => {
+        events.push("old-close");
+        closeStarted.resolve();
+      }).pipe(Effect.zipRight(Effect.promise(() => closeReleased.promise))),
+    ),
+  };
+  const replacement = makeWriter(() => Effect.sync(() => replacementWrite.resolve()));
+  connect.mockReturnValueOnce(Effect.succeed(first)).mockReturnValueOnce(
+    Effect.sync(() => {
+      events.push("replacement-connect");
+      return replacement;
+    }),
+  );
+  const controller = makeMeshController({ address: "test-light", statePath, connectionIdleMs: 10 });
+  const initial = Effect.runPromise(controller.send(Domain.Off.make({})));
+  await firstWrite.promise;
+  await vi.advanceTimersByTimeAsync(200);
+  await initial;
+  await vi.advanceTimersByTimeAsync(10);
+  await closeStarted.promise;
+
+  const next = Effect.runPromise(controller.send(command));
+  await vi.advanceTimersByTimeAsync(20);
+  expect(connect).toHaveBeenCalledTimes(1);
+  closeReleased.resolve();
+  await replacementWrite.promise;
+  await vi.advanceTimersByTimeAsync(300);
+  await next;
+
+  expect(events).toEqual(["old-close", "replacement-connect"]);
+  expect(first.close).toHaveBeenCalledTimes(1);
+});
+
+test("timeout cleanup cannot retry an old close after a queued replacement connects", async () => {
+  vi.useFakeTimers();
+  const closeStarted = deferred();
+  const secondCloseStarted = deferred();
+  const secondCloseReleased = deferred();
+  const replacementWrite = deferred();
+  const events: string[] = [];
+  let closeAttempts = 0;
+  const first = {
+    ...makeWriter(() => Effect.fail(new BleError({ message: "link dropped" }))),
+    close: vi.fn<ProxyWriterConnection["close"]>(() =>
+      Effect.suspend(() => {
+        closeAttempts++;
+        events.push(`old-close-${closeAttempts}`);
+        closeStarted.resolve();
+        if (closeAttempts === 1) return Effect.never;
+        secondCloseStarted.resolve();
+        return Effect.promise(() => secondCloseReleased.promise);
+      }),
+    ),
+  };
+  connect.mockReturnValueOnce(Effect.succeed(first)).mockReturnValueOnce(
+    Effect.sync(() => {
+      events.push("replacement-connect");
+      return makeWriter(() => Effect.sync(() => replacementWrite.resolve()));
+    }),
+  );
+  const controller = makeMeshController({ address: "test-light", statePath, sendTimeoutMs: 500 });
+  let settled = false;
+  const failing = Effect.runPromiseExit(controller.send(command)).then((result) => {
+    settled = true;
+    return result;
+  });
+  await closeStarted.promise;
+  const queued = Effect.runPromise(controller.send(Domain.Off.make({})));
+  await vi.advanceTimersByTimeAsync(500);
+  expect(settled).toBe(false);
+  expect(connect).toHaveBeenCalledTimes(1);
+  await vi.advanceTimersByTimeAsync(2500);
+  await secondCloseStarted.promise;
+  expect(connect).toHaveBeenCalledTimes(1);
+  secondCloseReleased.resolve();
+  const failure = await failing;
+  expect(failure._tag).toBe("Failure");
+  if (failure._tag === "Failure")
+    expect(Cause.pretty(failure.cause)).toContain("timed out after 500ms");
+  await replacementWrite.promise;
+  await vi.advanceTimersByTimeAsync(200);
+  await queued;
+  await vi.advanceTimersByTimeAsync(3000);
+
+  expect(events).toEqual(["old-close-1", "old-close-2", "replacement-connect"]);
+  expect(connect).toHaveBeenCalledTimes(2);
+});
+
+test("failed cleanup fences replacement until a later native disconnect completes", async () => {
+  vi.useFakeTimers();
+  const closeStarted = deferred();
+  const writeStarted = deferred();
+  const nativeDisconnect = deferred();
+  const replacementWrite = deferred();
+  let closeAttempts = 0;
+  const first = {
+    ...makeWriter(() =>
+      Effect.sync(() => writeStarted.resolve()).pipe(Effect.zipRight(Effect.never)),
+    ),
+    close: vi.fn<ProxyWriterConnection["close"]>(() =>
+      Effect.sync(() => {
+        closeAttempts++;
+        closeStarted.resolve();
+      }).pipe(Effect.zipRight(Effect.promise(() => nativeDisconnect.promise))),
+    ),
+  };
+  connect
+    .mockReturnValueOnce(Effect.succeed(first))
+    .mockReturnValueOnce(
+      Effect.succeed(makeWriter(() => Effect.sync(() => replacementWrite.resolve()))),
+    );
+  const controller = makeMeshController({ address: "test-light", statePath, sendTimeoutMs: 500 });
+  const failing = Effect.runPromiseExit(controller.send(command));
+  await writeStarted.promise;
+  const startedAt = Date.now();
+  await vi.advanceTimersByTimeAsync(500);
+  await closeStarted.promise;
+  await vi.advanceTimersByTimeAsync(6000);
+  const failure = await failing;
+  expect(Date.now() - startedAt).toBe(6500);
+  expect(failure._tag).toBe("Failure");
+  if (failure._tag === "Failure")
+    expect(Cause.pretty(failure.cause)).toContain("timed out after 500ms");
+  expect(closeAttempts).toBe(2);
+  expect(connect).toHaveBeenCalledTimes(1);
+
+  const recovering = Effect.runPromise(controller.send(Domain.Off.make({})));
+  await vi.advanceTimersByTimeAsync(100);
+  expect(connect).toHaveBeenCalledTimes(1);
+  nativeDisconnect.resolve();
+  await replacementWrite.promise;
+  await vi.advanceTimersByTimeAsync(200);
+  await recovering;
+  await vi.advanceTimersByTimeAsync(3000);
+
+  expect(closeAttempts).toBe(3);
+  expect(connect).toHaveBeenCalledTimes(2);
 });

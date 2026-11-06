@@ -3,7 +3,7 @@
 
 import { EventEmitter } from "node:events";
 import { Effect } from "effect";
-import { afterEach, expect, test } from "vite-plus/test";
+import { afterEach, expect, test, vi } from "vite-plus/test";
 import {
   __setNobleForTesting,
   buildDiscoveredDevice,
@@ -19,6 +19,7 @@ import { inferredDirectAddressType } from "../src/ble/proxy.ts";
 const hardwareAvailable = process.env.MESH_BLE_AVAILABLE === "1";
 
 afterEach(() => {
+  vi.useRealTimers();
   __setNobleForTesting(undefined);
 });
 
@@ -376,7 +377,7 @@ test("connectProxyWriter: a stuck disconnect does not hold the BLE operation que
   expect(Date.now() - startedAt).toBeLessThan(8_000);
 }, 10_000);
 
-test("connectProxyWriter: a timed-out close can be retried", async () => {
+test("connectProxyWriter: a rejected native close can be retried", async () => {
   let disconnectCount = 0;
 
   class RetryDisconnectNoble extends EventEmitter implements NobleLike {
@@ -390,7 +391,9 @@ test("connectProxyWriter: a timed-out close can be retried", async () => {
         connectAsync: async () => {},
         disconnectAsync: () => {
           disconnectCount++;
-          return disconnectCount === 1 ? new Promise<void>(() => {}) : Promise.resolve();
+          return disconnectCount === 1
+            ? Promise.reject(new Error("disconnect failed"))
+            : Promise.resolve();
         },
         discoverServicesAsync: async () => [
           {
@@ -415,6 +418,66 @@ test("connectProxyWriter: a timed-out close can be retried", async () => {
   await Effect.runPromise(connection.close());
   expect(disconnectCount).toBe(2);
 }, 10_000);
+
+test("connectProxyWriter: a timed-out close joins its pending native disconnect", async () => {
+  vi.useFakeTimers();
+  let releaseDisconnect: (() => void) | undefined;
+  let markStarted: (() => void) | undefined;
+  const started = new Promise<void>((resolve) => {
+    markStarted = resolve;
+  });
+  const disconnected = new Promise<void>((resolve) => {
+    releaseDisconnect = resolve;
+  });
+  const disconnect = vi.fn(() => {
+    markStarted?.();
+    return disconnected;
+  });
+  const peripheral = {
+    address: "A4:C1:38:21:09:80",
+    state: "connected",
+    disconnectAsync: disconnect,
+    discoverServicesAsync: async () => [
+      {
+        uuid: MESH_PROXY_SERVICE_UUID,
+        discoverCharacteristicsAsync: async () => [
+          { uuid: "2add", properties: ["writeWithoutResponse"] },
+        ],
+      },
+    ],
+  };
+  class PendingDisconnectNoble extends EventEmitter implements NobleLike {
+    state = "poweredOn";
+    async connectAsync() {
+      return peripheral;
+    }
+    async startScanningAsync(): Promise<void> {}
+    async stopScanningAsync(): Promise<void> {}
+  }
+  __setNobleForTesting(new PendingDisconnectNoble());
+  const writer = await Effect.runPromise(
+    connectProxyWriter(peripheral.address, { directAddressType: "public" }),
+  );
+  const firstClose = Effect.runPromiseExit(writer.close());
+  await started;
+  await vi.advanceTimersByTimeAsync(3000);
+  expect((await firstClose)._tag).toBe("Failure");
+
+  // Even if Noble already reports disconnected, the native operation must
+  // finish before close can permit the controller to reconnect this object.
+  peripheral.state = "disconnected";
+  let settled = false;
+  const secondClose = Effect.runPromise(writer.close()).then(() => {
+    settled = true;
+  });
+  await vi.advanceTimersByTimeAsync(100);
+  expect(settled).toBe(false);
+  expect(disconnect).toHaveBeenCalledTimes(1);
+  releaseDisconnect?.();
+  await secondClose;
+  await Effect.runPromise(writer.close());
+  expect(disconnect).toHaveBeenCalledTimes(1);
+});
 
 test("connectProxyWriter: direct connection skips scanning when address type is known", async () => {
   let scanCount = 0;
