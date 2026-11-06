@@ -14,7 +14,7 @@
 // (AKF=0, AID=0). The proxy connection is opened once for the session and
 // closed by the surrounding Scope on exit.
 
-import { Effect, Scope } from "effect";
+import { Effect, Fiber, Scope } from "effect";
 import { connectProxy } from "../ble/proxy.ts";
 import { BleError } from "../ble/errors.ts";
 import type { ProxyConnection } from "../ble/types.ts";
@@ -98,7 +98,7 @@ const sendAndAwait = (params: SendAndAwaitParams): Effect.Effect<void, ConfigErr
     });
 
     // Fork the receiver before writing so we don't race the device's reply.
-    const awaitFiber = yield* Effect.fork(
+    const awaitFiber = yield* Effect.forkChild(
       awaitConfigStatus(conn, expectedStatusOpcode, {
         deviceKey: opts.deviceKey,
         networkKey: opts.networkKey,
@@ -107,11 +107,12 @@ const sendAndAwait = (params: SendAndAwaitParams): Effect.Effect<void, ConfigErr
         ivIndex: opts.ivIndex,
         timeoutMs: opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,
       }),
+      { startImmediately: true },
     );
 
     yield* conn.write(frame);
 
-    const result = yield* awaitFiber.await;
+    const result = yield* Fiber.await(awaitFiber);
     if (result._tag === "Failure") {
       return yield* Effect.failCause(result.cause);
     }

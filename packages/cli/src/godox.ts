@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { join } from "node:path";
-import { Args, Command, Options } from "@effect/cli";
-import { NodeContext, NodeRuntime } from "@effect/platform-node";
+import { Argument, Command, Flag } from "effect/cli";
+import { NodeServices, NodeRuntime } from "@effect/platform-node";
 import {
   defaultStatesDir,
   Domain,
@@ -40,7 +40,7 @@ const controllerFor = (entry: { address: string; statePath: string }) =>
 const scanCmd = Command.make(
   "scan",
   {
-    timeout: Options.integer("timeout").pipe(Options.withDefault(10)),
+    timeout: Flag.Int("timeout").pipe(Flag.withDefault(10)),
   },
   ({ timeout }) =>
     Effect.gen(function* () {
@@ -74,8 +74,8 @@ const lightsCmd = Command.make("lights", {}, () =>
 const provisionCmd = Command.make(
   "provision",
   {
-    address: Args.text({ name: "address" }),
-    name: Options.text("name"),
+    address: Argument.String("address"),
+    name: Flag.String("name"),
   },
   ({ address, name }) =>
     Effect.scoped(
@@ -98,7 +98,7 @@ const provisionCmd = Command.make(
     ),
 );
 
-const rebindCmd = Command.make("rebind", { name: Args.text({ name: "light" }) }, ({ name }) =>
+const rebindCmd = Command.make("rebind", { name: Argument.String("light") }, ({ name }) =>
   Effect.scoped(
     Effect.gen(function* () {
       const entry = yield* getLight(name);
@@ -123,9 +123,9 @@ const rebindCmd = Command.make("rebind", { name: Args.text({ name: "light" }) },
 const setCmd = Command.make(
   "set",
   {
-    name: Args.text({ name: "light" }),
-    brightness: Options.integer("brightness"),
-    cct: Options.integer("cct"),
+    name: Argument.String("light"),
+    brightness: Flag.Int("brightness"),
+    cct: Flag.Int("cct"),
   },
   ({ name, brightness, cct }) =>
     Effect.gen(function* () {
@@ -138,10 +138,10 @@ const setCmd = Command.make(
 const hsiCmd = Command.make(
   "hsi",
   {
-    name: Args.text({ name: "light" }),
-    brightness: Options.integer("brightness"),
-    hue: Options.integer("hue"),
-    saturation: Options.integer("saturation"),
+    name: Argument.String("light"),
+    brightness: Flag.Int("brightness"),
+    hue: Flag.Int("hue"),
+    saturation: Flag.Int("saturation"),
   },
   ({ name, brightness, hue: hueValue, saturation }) =>
     Effect.gen(function* () {
@@ -160,12 +160,12 @@ const hsiCmd = Command.make(
 const rgbwCmd = Command.make(
   "rgbw",
   {
-    name: Args.text({ name: "light" }),
-    brightness: Options.integer("brightness"),
-    red: Options.integer("red").pipe(Options.withDefault(0)),
-    green: Options.integer("green").pipe(Options.withDefault(0)),
-    blue: Options.integer("blue").pipe(Options.withDefault(0)),
-    white: Options.integer("white").pipe(Options.withDefault(0)),
+    name: Argument.String("light"),
+    brightness: Flag.Int("brightness"),
+    red: Flag.Int("red").pipe(Flag.withDefault(0)),
+    green: Flag.Int("green").pipe(Flag.withDefault(0)),
+    blue: Flag.Int("blue").pipe(Flag.withDefault(0)),
+    white: Flag.Int("white").pipe(Flag.withDefault(0)),
   },
   ({ name, brightness, red, green, blue, white }) =>
     Effect.gen(function* () {
@@ -186,11 +186,11 @@ const rgbwCmd = Command.make(
 const fxCmd = Command.make(
   "fx",
   {
-    name: Args.text({ name: "light" }),
-    brightness: Options.integer("brightness"),
-    effect: Options.integer("effect"),
-    level: Options.integer("level").pipe(Options.withDefault(0)),
-    filter: Options.integer("filter").pipe(Options.withDefault(0)),
+    name: Argument.String("light"),
+    brightness: Flag.Int("brightness"),
+    effect: Flag.Int("effect"),
+    level: Flag.Int("level").pipe(Flag.withDefault(0)),
+    filter: Flag.Int("filter").pipe(Flag.withDefault(0)),
   },
   ({ name, brightness, effect, level, filter }) =>
     Effect.gen(function* () {
@@ -207,7 +207,7 @@ const fxCmd = Command.make(
     }),
 );
 
-const offCmd = Command.make("off", { name: Args.text({ name: "light" }) }, ({ name }) =>
+const offCmd = Command.make("off", { name: Argument.String("light") }, ({ name }) =>
   Effect.gen(function* () {
     const entry = yield* getLight(name);
     const light = yield* controllerFor(entry);
@@ -218,8 +218,8 @@ const offCmd = Command.make("off", { name: Args.text({ name: "light" }) }, ({ na
 const renameCmd = Command.make(
   "rename",
   {
-    oldName: Args.text({ name: "old" }),
-    newName: Args.text({ name: "new" }),
+    oldName: Argument.String("old"),
+    newName: Argument.String("new"),
   },
   ({ oldName, newName }) =>
     Effect.gen(function* () {
@@ -238,7 +238,7 @@ const renameCmd = Command.make(
     }),
 );
 
-const forgetCmd = Command.make("forget", { name: Args.text({ name: "light" }) }, ({ name }) =>
+const forgetCmd = Command.make("forget", { name: Argument.String("light") }, ({ name }) =>
   Effect.gen(function* () {
     yield* removeLight(name);
     console.log(`Forgot "${name}"`);
@@ -261,10 +261,6 @@ const godox = Command.make("godox").pipe(
   ]),
 );
 
-const main = Command.run(godox, { name: "godox", version: packageJson.version });
+const main = Command.run(godox, { version: packageJson.version });
 
-main(process.argv).pipe(
-  Effect.ensuring(shutdownNoble),
-  Effect.provide(NodeContext.layer),
-  NodeRuntime.runMain,
-);
+main.pipe(Effect.ensuring(shutdownNoble), Effect.provide(NodeServices.layer), NodeRuntime.runMain);

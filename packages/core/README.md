@@ -21,7 +21,7 @@ pnpm add @godox-tl/core
 - **Domain** (`Domain.*`) — branded types (`Percent`, `Hue`, `Saturation`,
   `Kelvin` (2700–6500K), `Byte`) + a tagged `LightCommand` union (`Off`, `Cct`, `Hsi`,
   `Rgbw`, `Fx`) + smart constructors (`pct`, `kelvin`, …).
-- **`LightController`** — an Effect `Context.Tag` whose service is
+- **`LightController`** — an Effect `Context.Service` whose service is
   `{ send(cmd): Effect.Effect<void, TransportError | TransportUnsupportedError> }`.
   Transport packages such as `@godox-tl/mesh` provide the implementation.
 - **Registry** — a per-host JSON registry at `~/.config/godox-tl/registry.json`

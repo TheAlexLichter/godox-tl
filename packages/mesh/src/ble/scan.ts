@@ -2,7 +2,7 @@
 // Mesh Provisioning (0x1827) service. Port of upstream `scanner.scan`.
 //
 // We deliberately bridge noble's event-emitter API to Effect via
-// `Effect.async` so the caller gets a single Effect with a clean
+// `Effect.callback` so the caller gets a single Effect with a clean
 // interrupt path (stopScanningAsync runs on every exit).
 
 import type { DiscoveredDevice } from "@godox-tl/core";
@@ -77,7 +77,7 @@ export const dedupeDevices = (
 };
 
 const waitForPoweredOn = (noble: NobleLike): Effect.Effect<void, BleError> =>
-  Effect.async<void, BleError>((resume) => {
+  Effect.callback<void, BleError>((resume) => {
     if (noble.state === "poweredOn") {
       resume(Effect.void);
       return;
@@ -151,7 +151,7 @@ export const scanDevices = (
       const filter = opts.filter;
 
       const result = yield* withScanCleanup(noble, (start) =>
-        Effect.async<ReadonlyArray<DiscoveredDevice>, BleError>((resume) => {
+        Effect.callback<ReadonlyArray<DiscoveredDevice>, BleError>((resume) => {
           let settled = false;
 
           const onDiscover = (peripheral: PeripheralLike): void => {

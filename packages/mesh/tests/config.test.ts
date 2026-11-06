@@ -10,7 +10,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Effect, Queue, Stream } from "effect";
+import { Cause, Effect, Queue, Stream } from "effect";
 import { afterEach, beforeEach, expect, test } from "vite-plus/test";
 import { aesCcmDecrypt, aesCcmEncrypt } from "../src/crypto/aes.ts";
 import { k2 } from "../src/crypto/kdf.ts";
@@ -177,15 +177,32 @@ const makeFakeConn = (params: {
   readonly deviceKey: Uint8Array;
   readonly ivIndex: number;
   readonly onWrite: (write: CapturedWrite) => Uint8Array | null;
+  readonly unbuffered?: boolean;
 }): Effect.Effect<FakeBuild> =>
   Effect.gen(function* () {
     const queue = yield* Queue.unbounded<Uint8Array>();
     const writes: CapturedWrite[] = [];
+    const listeners = new Set<(frame: Uint8Array) => void>();
     const { encryptionKey, privacyKey } = k2(params.networkKey, new Uint8Array([0x00]));
 
     const conn: ProxyConnection = {
       address: "fake",
-      notifications: Stream.fromQueue(queue),
+      notifications: params.unbuffered
+        ? Stream.callback<Uint8Array>((queue) => {
+            const listener = (frame: Uint8Array): void => {
+              Queue.offerUnsafe(queue, frame);
+            };
+            return Effect.acquireRelease(
+              Effect.sync(() => {
+                listeners.add(listener);
+              }),
+              () =>
+                Effect.sync(() => {
+                  listeners.delete(listener);
+                }),
+            );
+          })
+        : Stream.fromQueue(queue),
       write: (pdu) =>
         Effect.gen(function* () {
           // Decode: Proxy → Network → LowerTransport → UpperTransport.
@@ -216,7 +233,11 @@ const makeFakeConn = (params: {
 
           const response = params.onWrite(captured);
           if (response) {
-            yield* Queue.offer(queue, response);
+            if (params.unbuffered) {
+              for (const listener of listeners) listener(response);
+            } else {
+              yield* Queue.offer(queue, response);
+            }
           }
         }),
     };
@@ -284,94 +305,98 @@ const PROVISIONER = 0x0001;
 const NODE = 0x0002;
 const IV_INDEX = 0;
 
-test("rebindOverConnection: sends AppKey Add + Model App Bind and advances seq by 2", async () => {
-  let nodeSeq = 100;
+test.each([false, true])(
+  "rebindOverConnection handles immediate replies (unbuffered=%s) and advances seq by 2",
+  async (unbuffered) => {
+    let nodeSeq = 100;
 
-  const program = Effect.gen(function* () {
-    const { conn, writes } = yield* makeFakeConn({
-      networkKey: NETWORK_KEY,
-      deviceKey: DEVICE_KEY,
-      ivIndex: IV_INDEX,
-      onWrite: (req) => {
-        const { opcode } = splitOpcode(req.accessPdu);
-        if (opcode === OPCODE_CONFIG_APP_KEY_ADD) {
-          // AppKey Status: status(1) || packed indexes(3) — values match request.
-          const payload = new Uint8Array(4);
-          payload[0] = 0x00; // success
-          // netIdx=0, appIdx=0 → packed bytes 00 00 00
-          nodeSeq += 1;
-          return encodeStatusFrame({
-            networkKey: NETWORK_KEY,
-            deviceKey: DEVICE_KEY,
-            src: NODE,
-            dst: PROVISIONER,
-            seq: nodeSeq,
-            ivIndex: IV_INDEX,
-            statusOpcode: OPCODE_CONFIG_APP_KEY_STATUS,
-            statusPayload: payload,
-          });
-        }
-        if (opcode === OPCODE_CONFIG_MODEL_APP_BIND) {
-          // ModelApp Status: status(1) || element(2,LE) || appIdx(2,LE) || vendor model(4)
-          const payload = new Uint8Array([
-            0x00,
-            NODE & 0xff,
-            (NODE >>> 8) & 0xff,
-            0x00,
-            0x00,
-            TELINK_COMPANY_ID & 0xff,
-            (TELINK_COMPANY_ID >>> 8) & 0xff,
-            TELINK_VENDOR_MODEL_ID & 0xff,
-            (TELINK_VENDOR_MODEL_ID >>> 8) & 0xff,
-          ]);
-          nodeSeq += 1;
-          return encodeStatusFrame({
-            networkKey: NETWORK_KEY,
-            deviceKey: DEVICE_KEY,
-            src: NODE,
-            dst: PROVISIONER,
-            seq: nodeSeq,
-            ivIndex: IV_INDEX,
-            statusOpcode: OPCODE_CONFIG_MODEL_APP_STATUS,
-            statusPayload: payload,
-          });
-        }
-        return null;
-      },
+    const program = Effect.gen(function* () {
+      const { conn, writes } = yield* makeFakeConn({
+        unbuffered,
+        networkKey: NETWORK_KEY,
+        deviceKey: DEVICE_KEY,
+        ivIndex: IV_INDEX,
+        onWrite: (req) => {
+          const { opcode } = splitOpcode(req.accessPdu);
+          if (opcode === OPCODE_CONFIG_APP_KEY_ADD) {
+            // AppKey Status: status(1) || packed indexes(3) — values match request.
+            const payload = new Uint8Array(4);
+            payload[0] = 0x00; // success
+            // netIdx=0, appIdx=0 → packed bytes 00 00 00
+            nodeSeq += 1;
+            return encodeStatusFrame({
+              networkKey: NETWORK_KEY,
+              deviceKey: DEVICE_KEY,
+              src: NODE,
+              dst: PROVISIONER,
+              seq: nodeSeq,
+              ivIndex: IV_INDEX,
+              statusOpcode: OPCODE_CONFIG_APP_KEY_STATUS,
+              statusPayload: payload,
+            });
+          }
+          if (opcode === OPCODE_CONFIG_MODEL_APP_BIND) {
+            // ModelApp Status: status(1) || element(2,LE) || appIdx(2,LE) || vendor model(4)
+            const payload = new Uint8Array([
+              0x00,
+              NODE & 0xff,
+              (NODE >>> 8) & 0xff,
+              0x00,
+              0x00,
+              TELINK_COMPANY_ID & 0xff,
+              (TELINK_COMPANY_ID >>> 8) & 0xff,
+              TELINK_VENDOR_MODEL_ID & 0xff,
+              (TELINK_VENDOR_MODEL_ID >>> 8) & 0xff,
+            ]);
+            nodeSeq += 1;
+            return encodeStatusFrame({
+              networkKey: NETWORK_KEY,
+              deviceKey: DEVICE_KEY,
+              src: NODE,
+              dst: PROVISIONER,
+              seq: nodeSeq,
+              ivIndex: IV_INDEX,
+              statusOpcode: OPCODE_CONFIG_MODEL_APP_STATUS,
+              statusPayload: payload,
+            });
+          }
+          return null;
+        },
+      });
+
+      const result = yield* rebindOverConnection(conn, {
+        sequenceDirectory,
+        networkKey: NETWORK_KEY,
+        appKey: APP_KEY,
+        deviceKey: DEVICE_KEY,
+        ivIndex: IV_INDEX,
+        provisionerAddress: PROVISIONER,
+        nodeAddress: NODE,
+        sequenceNumber: 50,
+      });
+
+      return { result, writes };
     });
 
-    const result = yield* rebindOverConnection(conn, {
-      sequenceDirectory,
-      networkKey: NETWORK_KEY,
-      appKey: APP_KEY,
-      deviceKey: DEVICE_KEY,
-      ivIndex: IV_INDEX,
-      provisionerAddress: PROVISIONER,
-      nodeAddress: NODE,
-      sequenceNumber: 50,
-    });
+    const { result, writes } = await Effect.runPromise(program);
 
-    return { result, writes };
-  });
+    expect(result.sequenceNumber).toBe(52); // 50 → 51 → 52
 
-  const { result, writes } = await Effect.runPromise(program);
+    expect(writes).toHaveLength(2);
+    // First write: AppKey Add with seq=50.
+    expect(writes[0]?.seq).toBe(50);
+    const first = splitOpcode(writes[0]!.accessPdu);
+    expect(first.opcode).toBe(OPCODE_CONFIG_APP_KEY_ADD);
+    // payload: 3-byte packed indexes + 16-byte appkey
+    expect(toHex(first.parameters)).toBe(`000000${toHex(APP_KEY)}`);
 
-  expect(result.sequenceNumber).toBe(52); // 50 → 51 → 52
-
-  expect(writes).toHaveLength(2);
-  // First write: AppKey Add with seq=50.
-  expect(writes[0]?.seq).toBe(50);
-  const first = splitOpcode(writes[0]!.accessPdu);
-  expect(first.opcode).toBe(OPCODE_CONFIG_APP_KEY_ADD);
-  // payload: 3-byte packed indexes + 16-byte appkey
-  expect(toHex(first.parameters)).toBe(`000000${toHex(APP_KEY)}`);
-
-  // Second write: Model App Bind with seq=51.
-  expect(writes[1]?.seq).toBe(51);
-  const second = splitOpcode(writes[1]!.accessPdu);
-  expect(second.opcode).toBe(OPCODE_CONFIG_MODEL_APP_BIND);
-  expect(toHex(second.parameters)).toBe("0200000011020000");
-});
+    // Second write: Model App Bind with seq=51.
+    expect(writes[1]?.seq).toBe(51);
+    const second = splitOpcode(writes[1]!.accessPdu);
+    expect(second.opcode).toBe(OPCODE_CONFIG_MODEL_APP_BIND);
+    expect(toHex(second.parameters)).toBe("0200000011020000");
+  },
+);
 
 test("rebindOverConnection: surfaces ConfigError stage=appKeyAdd when device returns non-zero status", async () => {
   const statePath = join(sequenceDirectory, "state.json");
@@ -437,25 +462,13 @@ test("rebindOverConnection: surfaces ConfigError stage=appKeyAdd when device ret
   );
   expect(next.sequenceNumber).toBe(2);
   if (exit._tag === "Failure") {
-    // Walk the cause to find the tagged error we expect.
-    const failures: unknown[] = [];
-    const collect = (c: unknown): void => {
-      if (!c || typeof c !== "object") return;
-      const obj = c as Record<string, unknown>;
-      if (obj._tag === "Fail") failures.push(obj.error);
-      if (obj._tag === "Sequential" || obj._tag === "Parallel") {
-        collect(obj.left);
-        collect(obj.right);
-      }
-      if (obj.cause) collect(obj.cause);
-    };
-    collect(exit.cause);
-    const err = failures.find((e) => (e as { _tag?: string })?._tag === "ConfigError") as
-      | { stage: string; status?: number; message: string }
-      | undefined;
-    expect(err).toBeDefined();
-    expect(err?.stage).toBe("appKeyAdd");
-    expect(err?.status).toBe(0x01);
+    const failure = Cause.findErrorOption(exit.cause);
+    const err = failure._tag === "Some" ? failure.value : undefined;
+    expect(err?._tag).toBe("ConfigError");
+    if (err?._tag === "ConfigError") {
+      expect(err.stage).toBe("appKeyAdd");
+      expect(err.status).toBe(0x01);
+    }
   }
 });
 

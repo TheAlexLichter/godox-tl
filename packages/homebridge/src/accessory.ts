@@ -85,7 +85,7 @@ export interface HomeKitFeatureConfig {
 /** Wraps one Service.Lightbulb for one registered light. */
 export class GodoxLightAccessory {
   private readonly service: Service;
-  private readonly controller: LightController["Type"];
+  private readonly controller: LightController["Service"];
   private readonly loggerLayer: Layer.Layer<never>;
   private readonly debouncer: Debouncer<CommandState>;
   private state: CommandState = {
@@ -367,7 +367,7 @@ export class GodoxLightAccessory {
       (this.controller.send(cmd) as Effect.Effect<void, unknown>).pipe(
         Effect.provide(this.loggerLayer),
         Effect.tap(() => Effect.sync(() => this.completeCommand(commandId, false))),
-        Effect.catchAll((err) =>
+        Effect.catch((err) =>
           Effect.sync(() => {
             this.completeCommand(commandId, true);
             this.log.warn(`[${this.entry.name}] send failed: ${this.formatSendError(err)}`);

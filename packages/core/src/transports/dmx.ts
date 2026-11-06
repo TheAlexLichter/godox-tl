@@ -8,19 +8,19 @@ import {
   SACNDriver,
 } from "dmx-ts";
 import type { IUniverseDriver } from "dmx-ts";
-import { Config, ConfigError, Effect, Layer, Schema } from "effect";
+import { Config, Effect, Layer, Schema } from "effect";
 import { channelCount, encode } from "../domain/encoder.ts";
 import type { DmxMode } from "../domain/light.ts";
 import { LightController, TransportError, TransportUnsupportedError } from "../light/controller.ts";
 
-export const DmxDriverKind = Schema.Literal(
+export const DmxDriverKind = Schema.Literals([
   "null",
   "artnet",
   "sacn",
   "enttec-usb-dmx-pro",
   "enttec-open-usb-dmx",
   "dmxking-ultra-dmx-pro",
-);
+]);
 export type DmxDriverKind = typeof DmxDriverKind.Type;
 
 export interface DmxOptions {
@@ -50,30 +50,27 @@ const buildDriver = (opts: DmxOptions): IUniverseDriver => {
 };
 
 export const DmxConfig = Config.all({
-  driver: Config.literal(
-    "null",
-    "artnet",
-    "sacn",
-    "enttec-usb-dmx-pro",
-    "enttec-open-usb-dmx",
-    "dmxking-ultra-dmx-pro",
-  )("GODOX_DMX_DRIVER").pipe(Config.withDefault("null" as const)),
-  mode: Config.literal(
-    "CCT",
-    "HSI",
-    "RGBW",
-    "FX",
-  )("GODOX_DMX_MODE").pipe(Config.withDefault("CCT" as const)),
-  startChannel: Config.integer("GODOX_DMX_START").pipe(
-    Config.withDefault(1),
-    Config.validate({
-      message: "startChannel must be in 1..512",
-      validation: (n: number) => n >= 1 && n <= 512,
-    }),
+  driver: Config.Literals(
+    [
+      "null",
+      "artnet",
+      "sacn",
+      "enttec-usb-dmx-pro",
+      "enttec-open-usb-dmx",
+      "dmxking-ultra-dmx-pro",
+    ],
+    "GODOX_DMX_DRIVER",
+  ).pipe(Config.withDefault("null" as const)),
+  mode: Config.Literals(["CCT", "HSI", "RGBW", "FX"], "GODOX_DMX_MODE").pipe(
+    Config.withDefault("CCT" as const),
   ),
-  host: Config.string("GODOX_DMX_HOST").pipe(Config.option),
-  serialPath: Config.string("GODOX_DMX_SERIAL").pipe(Config.option),
-  universeName: Config.string("GODOX_DMX_UNIVERSE").pipe(Config.withDefault("godox")),
+  startChannel: Config.schema(
+    Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 512 })),
+    "GODOX_DMX_START",
+  ).pipe(Config.withDefault(1)),
+  host: Config.String("GODOX_DMX_HOST").pipe(Config.option),
+  serialPath: Config.String("GODOX_DMX_SERIAL").pipe(Config.option),
+  universeName: Config.String("GODOX_DMX_UNIVERSE").pipe(Config.withDefault("godox")),
 });
 
 const acquireUniverse = (opts: DmxOptions) =>
@@ -92,7 +89,7 @@ const releaseUniverse = ({ dmx }: { dmx: DMX }) => Effect.promise(() => dmx.clos
 export const makeDmxLayer = (
   options: DmxOptions,
 ): Layer.Layer<LightController, TransportError | TransportUnsupportedError> =>
-  Layer.scoped(
+  Layer.effect(
     LightController,
     Effect.gen(function* () {
       const { startChannel, mode } = options;
@@ -147,8 +144,8 @@ export const makeDmxLayer = (
 
 export const DmxLayer: Layer.Layer<
   LightController,
-  TransportError | TransportUnsupportedError | ConfigError.ConfigError
-> = Layer.unwrapEffect(
+  TransportError | TransportUnsupportedError | Config.ConfigError
+> = Layer.unwrap(
   Effect.gen(function* () {
     const cfg = yield* DmxConfig;
     return makeDmxLayer({

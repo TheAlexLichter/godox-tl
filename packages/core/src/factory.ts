@@ -45,5 +45,5 @@ export type LightLayerFactory = (
 export const createLight = (
   entry: LightEntry,
   layerFactory: LightLayerFactory,
-): Effect.Effect<LightController["Type"], TransportError | TransportUnsupportedError> =>
+): Effect.Effect<LightController["Service"], TransportError | TransportUnsupportedError> =>
   LightController.pipe(Effect.provide(layerFactory(entry)));

@@ -2,7 +2,7 @@
 // out in the standard Homebridge format (`[time] [Godox TL] message`) instead
 // of Effect's default `timestamp=… level=INFO fiber=#N message=…` logfmt.
 
-import { Effect, Layer, Logger as EffectLogger, LogLevel } from "effect";
+import { Effect, Layer, Logger as EffectLogger, References } from "effect";
 import type { Logger as HomebridgeLogger } from "homebridge";
 
 const stringify = (message: unknown): string => {
@@ -25,12 +25,12 @@ const stringify = (message: unknown): string => {
 const makeHomebridgeEffectLogger = (hbLog: HomebridgeLogger) =>
   EffectLogger.make(({ logLevel, message }) => {
     const text = stringify(message);
-    switch (logLevel._tag) {
+    switch (logLevel) {
       case "Error":
       case "Fatal":
         hbLog.error(text);
         return;
-      case "Warning":
+      case "Warn":
         hbLog.warn(text);
         return;
       case "Info":
@@ -50,8 +50,16 @@ const makeHomebridgeEffectLogger = (hbLog: HomebridgeLogger) =>
  * printed for the current Homebridge log mode. */
 export const homebridgeLoggerLayer = (hbLog: HomebridgeLogger): Layer.Layer<never> =>
   Layer.merge(
-    EffectLogger.replace(EffectLogger.defaultLogger, makeHomebridgeEffectLogger(hbLog)),
-    EffectLogger.minimumLogLevel(LogLevel.Debug),
+    Layer.effect(
+      References.CurrentLoggers,
+      Effect.gen(function* () {
+        const loggers = new Set(yield* References.CurrentLoggers);
+        loggers.delete(EffectLogger.defaultLogger);
+        loggers.add(makeHomebridgeEffectLogger(hbLog));
+        return loggers;
+      }),
+    ),
+    Layer.succeed(References.MinimumLogLevel, "Debug"),
   );
 
 export type { HomebridgeLogger };

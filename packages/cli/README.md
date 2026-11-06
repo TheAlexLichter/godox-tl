@@ -1,7 +1,7 @@
 # @godox-tl/cli
 
 The `godox` command-line interface for Godox TL30 BLE control, built on
-[`@effect/cli`](https://effect.website/docs/cli/introduction). Provides scan,
+[Effect 4 `effect/cli`](https://github.com/Effect-TS/effect/tree/main/packages/effect/src/cli). Provides scan,
 lights, provision, rebind, CCT, HSI, RGBW, FX, off, rename, and forget
 subcommands with auto-generated `--help` and type-safe option parsing.
 

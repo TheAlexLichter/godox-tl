@@ -88,7 +88,9 @@ test.each(["discovery", "peripheral"] as const)(
     __setNobleForTesting(noble);
     const first = Effect.runFork(firstScan(kind, noble));
     await noble.firstStarted.promise;
-    const interrupted = Effect.runPromise(Fiber.interrupt(first));
+    const interrupted = Effect.runPromise(
+      Fiber.interrupt(first).pipe(Effect.andThen(Fiber.await(first))),
+    );
     await tick();
     expect(noble.listenerCount("discover")).toBe(0);
 
@@ -99,7 +101,7 @@ test.each(["discovery", "peripheral"] as const)(
     await noble.firstStopping.promise;
     expect(noble.starts).toBe(1);
     noble.releaseFirstStop.release();
-    expect(Exit.isInterrupted(await interrupted)).toBe(true);
+    expect(Exit.hasInterrupts(await interrupted)).toBe(true);
     await noble.secondStarted.promise;
     // The first scan's original timer must not stop this newer scan.
     await new Promise((resolve) => setTimeout(resolve, 120));
@@ -119,8 +121,10 @@ test.each(["discovery", "peripheral"] as const)(
     const first = Effect.runFork(firstScan(kind, noble));
     await noble.firstStarted.promise;
     const startedAt = Date.now();
-    const interrupted = await Effect.runPromise(Fiber.interrupt(first));
-    expect(Exit.isInterrupted(interrupted)).toBe(true);
+    const interrupted = await Effect.runPromise(
+      Fiber.interrupt(first).pipe(Effect.andThen(Fiber.await(first))),
+    );
+    expect(Exit.hasInterrupts(interrupted)).toBe(true);
     expect(Date.now() - startedAt).toBeLessThan(4_500);
     expect(noble.listenerCount("discover")).toBe(0);
     expect(noble.stops).toBe(0);
@@ -153,7 +157,11 @@ test.each(["discovery", "peripheral"] as const)(
     const first = Effect.runFork(firstScan(kind, noble));
     await tick();
     expect(noble.listenerCount("stateChange")).toBe(1);
-    expect(Exit.isInterrupted(await Effect.runPromise(Fiber.interrupt(first)))).toBe(true);
+    expect(
+      Exit.hasInterrupts(
+        await Effect.runPromise(Fiber.interrupt(first).pipe(Effect.andThen(Fiber.await(first)))),
+      ),
+    ).toBe(true);
     expect(noble.listenerCount("stateChange")).toBe(0);
     noble.emit("stateChange", "poweredOn");
     await tick();
@@ -199,8 +207,10 @@ test.each(["discovery", "peripheral"] as const)(
     const exit = await Effect.runPromiseExit(scan);
     expect(Exit.isFailure(exit)).toBe(true);
     if (Exit.isFailure(exit)) {
-      expect(Cause.defects(exit.cause)).toHaveLength(0);
-      const failure = Cause.failureOption(exit.cause);
+      expect(
+        exit.cause.reasons.filter(Cause.isDieReason).map((reason) => reason.defect),
+      ).toHaveLength(0);
+      const failure = Cause.findErrorOption(exit.cause);
       expect(Option.isSome(failure)).toBe(true);
       if (Option.isSome(failure)) {
         expect(failure.value).toBeInstanceOf(BleError);
@@ -231,6 +241,7 @@ test("successful discovery fails promptly when native shutdown stays pending", a
   expect(noble.starts).toBe(1);
   noble.releaseFirstStop.release();
   await tick();
+
   expect(await Effect.runPromise(scanDevices({ timeoutSeconds: 0.01 }, noble))).toHaveLength(1);
 }, 6_000);
 

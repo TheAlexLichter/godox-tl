@@ -1,18 +1,34 @@
 import { Schema } from "effect";
 
-export const Percent = Schema.Number.pipe(Schema.between(0, 100), Schema.brand("Percent"));
+export const Percent = Schema.Number.pipe(
+  Schema.check(Schema.isBetween({ minimum: 0, maximum: 100 })),
+  Schema.brand("Percent"),
+);
 export type Percent = typeof Percent.Type;
 
-export const Hue = Schema.Number.pipe(Schema.between(0, 360), Schema.brand("Hue"));
+export const Hue = Schema.Number.pipe(
+  Schema.check(Schema.isBetween({ minimum: 0, maximum: 360 })),
+  Schema.brand("Hue"),
+);
 export type Hue = typeof Hue.Type;
 
-export const Saturation = Schema.Number.pipe(Schema.between(0, 100), Schema.brand("Saturation"));
+export const Saturation = Schema.Number.pipe(
+  Schema.check(Schema.isBetween({ minimum: 0, maximum: 100 })),
+  Schema.brand("Saturation"),
+);
 export type Saturation = typeof Saturation.Type;
 
-export const Kelvin = Schema.Number.pipe(Schema.between(2700, 6500), Schema.brand("Kelvin"));
+export const Kelvin = Schema.Number.pipe(
+  Schema.check(Schema.isBetween({ minimum: 2700, maximum: 6500 })),
+  Schema.brand("Kelvin"),
+);
 export type Kelvin = typeof Kelvin.Type;
 
-export const Byte = Schema.Number.pipe(Schema.int(), Schema.between(0, 255), Schema.brand("Byte"));
+export const Byte = Schema.Number.pipe(
+  Schema.check(Schema.isInt()),
+  Schema.check(Schema.isBetween({ minimum: 0, maximum: 255 })),
+  Schema.brand("Byte"),
+);
 export type Byte = typeof Byte.Type;
 
 export const Off = Schema.TaggedStruct("Off", {});
@@ -39,10 +55,10 @@ export const Fx = Schema.TaggedStruct("Fx", {
   filter: Byte,
 });
 
-export const LightCommand = Schema.Union(Off, Cct, Hsi, Rgbw, Fx);
+export const LightCommand = Schema.Union([Off, Cct, Hsi, Rgbw, Fx]);
 export type LightCommand = typeof LightCommand.Type;
 
-export const DmxMode = Schema.Literal("CCT", "HSI", "RGBW", "FX");
+export const DmxMode = Schema.Literals(["CCT", "HSI", "RGBW", "FX"]);
 export type DmxMode = typeof DmxMode.Type;
 
 export const pct = (n: number): Percent => Percent.make(n);

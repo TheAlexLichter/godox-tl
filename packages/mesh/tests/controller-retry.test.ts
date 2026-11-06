@@ -92,7 +92,7 @@ test("retries a failed cached writer with fresh sequence numbers", async () => {
   const recovered: number[] = [];
   const cached = makeWriter((pdu) =>
     Effect.sync(() => attempts.push(sequence(pdu))).pipe(
-      Effect.zipRight(
+      Effect.andThen(
         Effect.suspend(() =>
           failWrites ? Effect.fail(new BleError({ message: "link dropped" })) : Effect.void,
         ),
@@ -124,7 +124,7 @@ test("a second BLE failure stops after one retry", async () => {
   const attempts: number[] = [];
   const fail = (pdu: Uint8Array) =>
     Effect.sync(() => attempts.push(sequence(pdu))).pipe(
-      Effect.zipRight(Effect.fail(new BleError({ message: "write refused" }))),
+      Effect.andThen(Effect.fail(new BleError({ message: "write refused" }))),
     );
   const first = makeWriter(fail);
   const second = makeWriter(fail);
@@ -153,12 +153,12 @@ test("the retry shares the original overall send deadline", async () => {
   });
   const first = makeWriter(() =>
     Effect.sync(() => firstStarted?.()).pipe(
-      Effect.zipRight(Effect.sleep("35 millis")),
-      Effect.zipRight(Effect.fail(new BleError({ message: "link dropped" }))),
+      Effect.andThen(Effect.sleep("35 millis")),
+      Effect.andThen(Effect.fail(new BleError({ message: "link dropped" }))),
     ),
   );
   const second = makeWriter(() =>
-    Effect.sync(() => secondStarted?.()).pipe(Effect.zipRight(Effect.never)),
+    Effect.sync(() => secondStarted?.()).pipe(Effect.andThen(Effect.never)),
   );
   connect.mockReturnValueOnce(Effect.succeed(first)).mockReturnValueOnce(Effect.succeed(second));
   const controller = makeMeshController({
@@ -227,7 +227,7 @@ test("a new send joins idle cleanup before replacing the same peripheral", async
       Effect.sync(() => {
         events.push("old-close");
         closeStarted.resolve();
-      }).pipe(Effect.zipRight(Effect.promise(() => closeReleased.promise))),
+      }).pipe(Effect.andThen(Effect.promise(() => closeReleased.promise))),
     ),
   };
   const replacement = makeWriter(() => Effect.sync(() => replacementWrite.resolve()));
@@ -321,13 +321,13 @@ test("failed cleanup fences replacement until a later native disconnect complete
   let closeAttempts = 0;
   const first = {
     ...makeWriter(() =>
-      Effect.sync(() => writeStarted.resolve()).pipe(Effect.zipRight(Effect.never)),
+      Effect.sync(() => writeStarted.resolve()).pipe(Effect.andThen(Effect.never)),
     ),
     close: vi.fn<ProxyWriterConnection["close"]>(() =>
       Effect.sync(() => {
         closeAttempts++;
         closeStarted.resolve();
-      }).pipe(Effect.zipRight(Effect.promise(() => nativeDisconnect.promise))),
+      }).pipe(Effect.andThen(Effect.promise(() => nativeDisconnect.promise))),
     ),
   };
   connect
@@ -370,12 +370,10 @@ test("a timed-out write holds the source lease until disconnect cleanup finishes
   const secondConnected = deferred();
   const secondWrite = vi.fn(() => Effect.void);
   const first = {
-    ...makeWriter(() =>
-      Effect.sync(() => firstWrite.resolve()).pipe(Effect.zipRight(Effect.never)),
-    ),
+    ...makeWriter(() => Effect.sync(() => firstWrite.resolve()).pipe(Effect.andThen(Effect.never))),
     close: vi.fn<ProxyWriterConnection["close"]>(() =>
       Effect.sync(() => closeStarted.resolve()).pipe(
-        Effect.zipRight(Effect.promise(() => closeReleased.promise)),
+        Effect.andThen(Effect.promise(() => closeReleased.promise)),
       ),
     ),
   };

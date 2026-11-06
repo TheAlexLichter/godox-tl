@@ -7,7 +7,7 @@
 // top of the controller wraps the entire lifetime.
 
 import type { Characteristic, Peripheral } from "@stoprocent/noble";
-import { Duration, Effect, type Scope, Stream } from "effect";
+import { Queue, Duration, Effect, type Scope, Stream } from "effect";
 import { matchAddress, normalizeAddress } from "./address.ts";
 import { BleError } from "./errors.ts";
 import { getNoble, type NobleLike, type PeripheralLike, withNobleOperation } from "./noble.ts";
@@ -17,11 +17,9 @@ import type { ProxyConnection, ProxyWriterConnection } from "./types.ts";
 
 const MESH_PROXY_DATA_IN_UUID = "2add"; // proxy client → server (writes)
 const MESH_PROXY_DATA_OUT_UUID = "2ade"; // server → proxy client (notifications)
-
 const DEFAULT_FIND_PERIPHERAL_TIMEOUT_MS = 20_000;
 const POWERED_ON_TIMEOUT_MS = 5_000;
 const DIRECT_CONNECT_TIMEOUT_MS = 4_000;
-
 export interface ProxyConnectOptions {
   /** Override address-type inference for a direct connection attempt. */
   readonly directAddressType?: "public" | "random";
@@ -43,7 +41,7 @@ export const inferredDirectAddressType = (
 };
 
 const waitPoweredOn = (noble: NobleLike): Effect.Effect<void, BleError> =>
-  Effect.async<void, BleError>((resume) => {
+  Effect.callback<void, BleError>((resume) => {
     if (noble.state === "poweredOn") {
       resume(Effect.void);
       return;
@@ -81,7 +79,6 @@ const waitPoweredOn = (noble: NobleLike): Effect.Effect<void, BleError> =>
 
 const formatTimeout = (timeoutMs: number): string =>
   timeoutMs % 1_000 === 0 ? `${timeoutMs / 1_000}s` : `${timeoutMs}ms`;
-
 const candidateAddresses = (
   address: string,
   fallbacks: ReadonlyArray<string> = [],
@@ -102,7 +99,7 @@ const findPeripheral = (
   timeoutMs: number,
 ): Effect.Effect<Peripheral, BleError> =>
   withScanCleanup(noble, (start) =>
-    Effect.async<Peripheral, BleError>((resume) => {
+    Effect.callback<Peripheral, BleError>((resume) => {
       let settled = false;
 
       const cleanup = (): void => {
@@ -156,10 +153,8 @@ const findPeripheral = (
       });
     }),
   );
-
 const POST_CONNECT_SETTLE_MS = 3_000;
 const DISCOVER_TIMEOUT_MS = 15_000;
-
 // Telink-aware: keep the settle window on scanned connections. Direct
 // connections worked with immediate discovery on both Godox lights. Targeted
 // `discoverServicesAsync([UUID])` uses Find By Type Value; broad discoverAll
@@ -167,7 +162,13 @@ const DISCOVER_TIMEOUT_MS = 15_000;
 const discoverProxyCharacteristics = (
   peripheral: Peripheral,
   settleMs: number,
-): Effect.Effect<{ readonly dataIn: Characteristic; readonly dataOut: Characteristic }, BleError> =>
+): Effect.Effect<
+  {
+    readonly dataIn: Characteristic;
+    readonly dataOut: Characteristic;
+  },
+  BleError
+> =>
   Effect.gen(function* () {
     if (settleMs > 0) yield* Effect.sleep(`${settleMs} millis`);
     const services = yield* Effect.tryPromise({
@@ -178,12 +179,14 @@ const discoverProxyCharacteristics = (
           message: `discoverServicesAsync(['${MESH_PROXY_SERVICE_UUID}']) failed`,
         }),
     }).pipe(
-      Effect.timeoutFail({
+      Effect.timeoutOrElse({
         duration: Duration.millis(DISCOVER_TIMEOUT_MS),
-        onTimeout: () =>
-          new BleError({
-            message: `Mesh Proxy service discovery hung past ${DISCOVER_TIMEOUT_MS / 1000}s`,
-          }),
+        orElse: () =>
+          Effect.fail(
+            new BleError({
+              message: `Mesh Proxy service discovery hung past ${DISCOVER_TIMEOUT_MS / 1_000}s`,
+            }),
+          ),
       }),
     );
     const service = services.find((s) => s.uuid.toLowerCase() === MESH_PROXY_SERVICE_UUID);
@@ -199,9 +202,9 @@ const discoverProxyCharacteristics = (
         service.discoverCharacteristicsAsync([MESH_PROXY_DATA_IN_UUID, MESH_PROXY_DATA_OUT_UUID]),
       catch: (cause) => new BleError({ cause, message: "discoverCharacteristicsAsync failed" }),
     }).pipe(
-      Effect.timeoutFail({
+      Effect.timeoutOrElse({
         duration: Duration.millis(DISCOVER_TIMEOUT_MS),
-        onTimeout: () => new BleError({ message: "Characteristic discovery hung" }),
+        orElse: () => Effect.fail(new BleError({ message: "Characteristic discovery hung" })),
       }),
     );
     const dataIn = characteristics.find((c) => c.uuid.toLowerCase() === MESH_PROXY_DATA_IN_UUID);
@@ -230,12 +233,14 @@ const discoverProxyDataIn = (
           message: `discoverServicesAsync(['${MESH_PROXY_SERVICE_UUID}']) failed`,
         }),
     }).pipe(
-      Effect.timeoutFail({
+      Effect.timeoutOrElse({
         duration: Duration.millis(DISCOVER_TIMEOUT_MS),
-        onTimeout: () =>
-          new BleError({
-            message: `Mesh Proxy service discovery hung past ${DISCOVER_TIMEOUT_MS / 1000}s`,
-          }),
+        orElse: () =>
+          Effect.fail(
+            new BleError({
+              message: `Mesh Proxy service discovery hung past ${DISCOVER_TIMEOUT_MS / 1_000}s`,
+            }),
+          ),
       }),
     );
     const service = services.find((s) => s.uuid.toLowerCase() === MESH_PROXY_SERVICE_UUID);
@@ -250,9 +255,9 @@ const discoverProxyDataIn = (
       try: () => service.discoverCharacteristicsAsync([MESH_PROXY_DATA_IN_UUID]),
       catch: (cause) => new BleError({ cause, message: "discoverCharacteristicsAsync failed" }),
     }).pipe(
-      Effect.timeoutFail({
+      Effect.timeoutOrElse({
         duration: Duration.millis(DISCOVER_TIMEOUT_MS),
-        onTimeout: () => new BleError({ message: "Characteristic discovery hung" }),
+        orElse: () => Effect.fail(new BleError({ message: "Characteristic discovery hung" })),
       }),
     );
     const dataIn = characteristics.find((c) => c.uuid.toLowerCase() === MESH_PROXY_DATA_IN_UUID);
@@ -276,7 +281,10 @@ const DISCONNECT_TIMEOUT_MS = 3_000;
 const pendingDisconnects = new WeakMap<Peripheral, Promise<void>>();
 const peripheralOwners = new WeakMap<
   Peripheral,
-  { readonly noble: NobleLike; readonly addresses: Set<string> }
+  {
+    readonly noble: NobleLike;
+    readonly addresses: Set<string>;
+  }
 >();
 const pendingAddressCleanups = new WeakMap<NobleLike, Map<string, Set<Promise<void>>>>();
 const connectionGenerations = new WeakMap<NobleLike, Map<string, object>>();
@@ -418,9 +426,10 @@ const withBleTimeout = <A>(
   label: string,
 ): Effect.Effect<A, BleError> =>
   effect.pipe(
-    Effect.timeoutFail({
+    Effect.timeoutOrElse({
       duration: Duration.millis(STEP_TIMEOUT_MS),
-      onTimeout: () => new BleError({ message: `${label} timed out after ${STEP_TIMEOUT_MS}ms` }),
+      orElse: () =>
+        Effect.fail(new BleError({ message: `${label} timed out after ${STEP_TIMEOUT_MS}ms` })),
     }),
   );
 
@@ -502,7 +511,7 @@ const connectPeripheral = (
         pendingAddressCleanup(noble, [peripheral.address, peripheral.id, peripheral.uuid]) ??
         pendingDisconnects.get(peripheral),
     ).pipe(
-      Effect.zipRight(
+      Effect.andThen(
         beginConnection(
           noble,
           [...(peripheralOwners.get(peripheral)?.addresses ?? [])],
@@ -510,7 +519,7 @@ const connectPeripheral = (
           peripheral,
         ),
       ),
-      Effect.zipRight(
+      Effect.andThen(
         withBleTimeout(
           Effect.tryPromise({
             try: () => {
@@ -529,10 +538,10 @@ const connectPeripheral = (
             Effect.logDebug(
               `[ble] connect failed for ${address}; cleaning up peripheral: ${error.message}`,
             ).pipe(
-              Effect.zipRight(Effect.sync(cancel)),
-              Effect.zipRight(
+              Effect.andThen(Effect.sync(cancel)),
+              Effect.andThen(
                 awaitPendingDisconnect(() => abandonedCleanup).pipe(
-                  Effect.catchAll(() => Effect.void),
+                  Effect.catch(() => Effect.void),
                 ),
               ),
             ),
@@ -548,7 +557,11 @@ const openProxyPeripheral = (
   address: string,
   options: ProxyConnectOptions,
 ): Effect.Effect<
-  { readonly peripheral: Peripheral; readonly direct: boolean; readonly generation: object },
+  {
+    readonly peripheral: Peripheral;
+    readonly direct: boolean;
+    readonly generation: object;
+  },
   BleError
 > =>
   Effect.gen(function* () {
@@ -608,17 +621,19 @@ const openProxyPeripheral = (
         catch: (cause) =>
           new BleError({ cause, message: `Direct BLE connection to ${address} failed` }),
       }).pipe(
-        Effect.timeoutFail({
+        Effect.timeoutOrElse({
           duration: Duration.millis(DIRECT_CONNECT_TIMEOUT_MS),
-          onTimeout: () => {
-            return new BleError({
-              message: `Direct BLE connection to ${address} timed out after ${DIRECT_CONNECT_TIMEOUT_MS}ms`,
-            });
+          orElse: () => {
+            return Effect.fail(
+              new BleError({
+                message: `Direct BLE connection to ${address} timed out after ${DIRECT_CONNECT_TIMEOUT_MS}ms`,
+              }),
+            );
           },
         }),
         Effect.tapError((error) =>
           Effect.logDebug(`[ble] ${error.message}; falling back to scan`).pipe(
-            Effect.zipRight(Effect.sync(cancelDirect)),
+            Effect.andThen(Effect.sync(cancelDirect)),
           ),
         ),
         Effect.onInterrupt(() => Effect.sync(cancelDirect)),
@@ -652,9 +667,7 @@ export const connectProxy = (
         ({ peripheral, generation }) =>
           Effect.suspend(() =>
             ownsConnection(peripheral, generation)
-              ? disconnectPeripheral(peripheral, generation).pipe(
-                  Effect.catchAll(() => Effect.void),
-                )
+              ? disconnectPeripheral(peripheral, generation).pipe(Effect.catch(() => Effect.void))
               : Effect.void,
           ),
       );
@@ -711,19 +724,23 @@ export const connectProxy = (
           }),
       );
       yield* Effect.logDebug(`[ble] subscribed; ready`);
-
-      const notifications: Stream.Stream<Uint8Array, BleError> = Stream.async<Uint8Array, BleError>(
-        (emit) => {
-          const handler = (buf: Uint8Array): void => {
-            void emit.single(buf);
-          };
-          listeners.add(handler);
-          return Effect.sync(() => {
-            listeners.delete(handler);
-          });
-        },
-      );
-
+      const notifications: Stream.Stream<Uint8Array, BleError> = Stream.callback<
+        Uint8Array,
+        BleError
+      >((emit) => {
+        const handler = (buf: Uint8Array): void => {
+          Queue.offerUnsafe(emit, buf);
+        };
+        return Effect.acquireRelease(
+          Effect.sync(() => {
+            listeners.add(handler);
+          }),
+          () =>
+            Effect.sync(() => {
+              listeners.delete(handler);
+            }),
+        );
+      });
       // Match the upstream Python (`response=False`) — Mesh Proxy Data In is
       // a Write-Without-Response characteristic on every Godox light we've
       // seen, and noble will reject writeAsync(..., false) if the

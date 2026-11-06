@@ -12,11 +12,11 @@ export class TransportUnsupportedError extends Data.TaggedError("TransportUnsupp
   readonly reason: string;
 }> {}
 
-export class LightController extends Context.Tag("LightController")<
+export class LightController extends Context.Service<
   LightController,
   {
     readonly send: (
       cmd: LightCommand,
     ) => Effect.Effect<void, TransportError | TransportUnsupportedError>;
   }
->() {}
+>()("LightController") {}
