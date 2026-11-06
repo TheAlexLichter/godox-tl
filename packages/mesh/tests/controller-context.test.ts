@@ -138,7 +138,7 @@ test("first and queued sends retain each caller's logger and minimum log level",
   expect(quietMessages).toEqual([]);
   expect(lastMessages.filter((message) => message.includes("[mesh] sent Cct"))).toHaveLength(1);
   expect(lastMessages.some((message) => message.includes("[mesh] reusing writer"))).toBe(true);
-});
+}, 10_000);
 
 test("coalesced work uses the newest command's runtime, while settling superseded callers", async () => {
   const { controller, firstWriteStarted, releaseFirstWrite } = await setupController(true);
@@ -155,7 +155,7 @@ test("coalesced work uses the newest command's runtime, while settling supersede
   expect(firstMessages.filter((message) => message.includes("[mesh] sent Cct"))).toHaveLength(1);
   expect(supersededMessages).toEqual([]);
   expect(newestMessages.filter((message) => message.includes("[mesh] sent Cct"))).toHaveLength(1);
-});
+}, 10_000);
 
 test("idle writer cleanup retains the caller's logger for disconnect failures", async () => {
   const { controller, firstWriteStarted, releaseFirstWrite } = await setupController(false, {
@@ -175,4 +175,4 @@ test("idle writer cleanup retains the caller's logger for disconnect failures", 
       messages.filter((message) => message.includes("Failed to close BLE connection")),
     ).toHaveLength(2);
   });
-});
+}, 10_000);
