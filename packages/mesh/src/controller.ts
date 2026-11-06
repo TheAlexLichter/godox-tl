@@ -132,25 +132,28 @@ export const makeMeshController = (options: MeshControllerOptions): LightControl
     idleTimer = undefined;
   };
 
-  const closeWriter = (): Promise<void> => {
-    clearIdleTimer();
-    const current = writer;
-    writer = undefined;
-    powerState = "unknown";
-    if (!current) return Promise.resolve();
-    return Effect.runPromise(current.close()).catch(() =>
-      Effect.runPromise(current.close()).catch(() => undefined),
-    );
-  };
+  const closeWriter = (): Effect.Effect<void> =>
+    Effect.suspend(() => {
+      clearIdleTimer();
+      const current = writer;
+      writer = undefined;
+      powerState = "unknown";
+      if (!current) return Effect.void;
+      return current
+        .close()
+        .pipe(
+          Effect.catchAllCause(() => current.close().pipe(Effect.catchAllCause(() => Effect.void))),
+        );
+    });
 
-  const scheduleIdleClose = (): void => {
+  const scheduleIdleClose = (runtime: Runtime.Runtime<never>): void => {
     clearIdleTimer();
     if (!persistent || idleMs === 0) {
-      void closeWriter();
+      void Runtime.runPromise(runtime)(closeWriter());
       return;
     }
     idleTimer = setTimeout(() => {
-      void closeWriter();
+      void Runtime.runPromise(runtime)(closeWriter());
     }, idleMs);
     idleTimer.unref?.();
   };
@@ -159,7 +162,7 @@ export const makeMeshController = (options: MeshControllerOptions): LightControl
     if (writer && persistent) {
       if (writer.isConnected?.() === false) {
         return Effect.logDebug(`[mesh] discarding disconnected writer for ${options.address}`).pipe(
-          Effect.zipRight(Effect.promise(closeWriter)),
+          Effect.zipRight(closeWriter()),
           Effect.zipRight(Effect.suspend(writerForSend)),
         );
       }
@@ -200,7 +203,7 @@ export const makeMeshController = (options: MeshControllerOptions): LightControl
         }
         return Effect.logDebug(
           `[mesh] retrying ${cmd._tag} on a fresh writer for ${options.address}`,
-        ).pipe(Effect.zipRight(Effect.promise(closeWriter)), Effect.zipRight(sendNow(cmd)));
+        ).pipe(Effect.zipRight(closeWriter()), Effect.zipRight(sendNow(cmd)));
       }),
       Effect.timeoutFail({
         duration: Duration.millis(sendTimeoutMs),
@@ -210,7 +213,7 @@ export const makeMeshController = (options: MeshControllerOptions): LightControl
             new Error(`${cmd._tag} send timed out after ${sendTimeoutMs}ms`),
           ),
       }),
-      Effect.tapError(() => Effect.promise(closeWriter)),
+      Effect.tapError(() => closeWriter()),
     );
 
   const writePdus = (
@@ -237,11 +240,7 @@ export const makeMeshController = (options: MeshControllerOptions): LightControl
       yield* Effect.logDebug(
         `[mesh] write complete for ${options.address} in ${Date.now() - startedAt}ms`,
       );
-    }).pipe(
-      Effect.catchAll((e) =>
-        Effect.promise(closeWriter).pipe(Effect.flatMap(() => Effect.fail(e))),
-      ),
-    );
+    }).pipe(Effect.catchAll((e) => closeWriter().pipe(Effect.flatMap(() => Effect.fail(e)))));
 
   const sendNow = (
     cmd: Domain.LightCommand,
@@ -313,10 +312,11 @@ export const makeMeshController = (options: MeshControllerOptions): LightControl
       if (conn) {
         yield* Effect.logDebug(`[mesh] sending ${cmd._tag} to ${options.address}`);
         yield* writePdus(conn, proxyPdus);
+        const runtime = yield* Effect.runtime<never>();
         yield* Effect.sync(() => {
           powerState = cmd._tag === "Off" ? "off" : "on";
           // Closing an uncached writer resets power state, so update it first.
-          scheduleIdleClose();
+          scheduleIdleClose(runtime);
         });
         yield* Effect.logDebug(`[mesh] sent ${cmd._tag} to ${options.address}`);
       }
