@@ -124,6 +124,7 @@ export const makeMeshController = (options: MeshControllerOptions): LightControl
   let idleTimer: NodeJS.Timeout | undefined;
   let inFlight: Promise<void> | undefined;
   let pending: ReadonlyArray<PendingSend> = [];
+  let powerState: "unknown" | "on" | "off" = "unknown";
 
   const clearIdleTimer = (): void => {
     if (!idleTimer) return;
@@ -135,6 +136,7 @@ export const makeMeshController = (options: MeshControllerOptions): LightControl
     clearIdleTimer();
     const current = writer;
     writer = undefined;
+    powerState = "unknown";
     if (!current) return Promise.resolve();
     return Effect.runPromise(current.close()).catch(() =>
       Effect.runPromise(current.close()).catch(() => undefined),
@@ -176,6 +178,7 @@ export const makeMeshController = (options: MeshControllerOptions): LightControl
       Effect.tap((conn) =>
         Effect.sync(() => {
           writer = conn;
+          powerState = "unknown";
         }),
       ),
       Effect.tap(() =>
@@ -210,10 +213,11 @@ export const makeMeshController = (options: MeshControllerOptions): LightControl
       Effect.tapError(() => Effect.promise(closeWriter)),
     );
 
-  const writePdus = (proxyPdus: ReadonlyArray<Uint8Array>): Effect.Effect<void, TransportError> =>
+  const writePdus = (
+    conn: ProxyWriterConnection,
+    proxyPdus: ReadonlyArray<Uint8Array>,
+  ): Effect.Effect<void, TransportError> =>
     Effect.gen(function* () {
-      clearIdleTimer();
-      const conn = yield* writerForSend();
       const startedAt = Date.now();
       for (const proxyPdu of proxyPdus) {
         yield* Effect.logDebug(`[mesh] writing ${proxyPdu.byteLength} bytes to ${options.address}`);
@@ -233,7 +237,6 @@ export const makeMeshController = (options: MeshControllerOptions): LightControl
       yield* Effect.logDebug(
         `[mesh] write complete for ${options.address} in ${Date.now() - startedAt}ms`,
       );
-      yield* Effect.sync(scheduleIdleClose);
     }).pipe(
       Effect.catchAll((e) =>
         Effect.promise(closeWriter).pipe(Effect.flatMap(() => Effect.fail(e))),
@@ -245,9 +248,16 @@ export const makeMeshController = (options: MeshControllerOptions): LightControl
   ): Effect.Effect<void, TransportError | TransportUnsupportedError> =>
     Effect.gen(function* () {
       const payload = yield* buildPayload(cmd);
-      // Brightness and color commands do not clear the fixture's soft power-off
-      // state. Wake it explicitly before applying an active command.
-      const payloads = cmd._tag === "Off" ? [payload] : [encodeOn(), payload];
+      clearIdleTimer();
+      // A new connection has unknown power state, so acquire it before deciding
+      // whether settings need an explicit wake. Warm slider updates need no wake.
+      const conn = options.dryRun ? undefined : yield* writerForSend();
+      const payloads =
+        cmd._tag === "Off"
+          ? [payload, payload]
+          : powerState === "on"
+            ? [payload]
+            : [encodeOn(), encodeOn(), payload];
 
       const proxyPdus = yield* Effect.gen(function* () {
         const state: MeshState = yield* loadMeshState(options.statePath).pipe(
@@ -300,9 +310,14 @@ export const makeMeshController = (options: MeshControllerOptions): LightControl
         return pdus;
       }).pipe(stateMutex.withPermits(1));
 
-      if (!options.dryRun) {
+      if (conn) {
         yield* Effect.logDebug(`[mesh] sending ${cmd._tag} to ${options.address}`);
-        yield* writePdus(proxyPdus);
+        yield* writePdus(conn, proxyPdus);
+        yield* Effect.sync(() => {
+          powerState = cmd._tag === "Off" ? "off" : "on";
+          // Closing an uncached writer resets power state, so update it first.
+          scheduleIdleClose();
+        });
         yield* Effect.logDebug(`[mesh] sent ${cmd._tag} to ${options.address}`);
       }
     });

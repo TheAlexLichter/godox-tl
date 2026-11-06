@@ -127,7 +127,7 @@ test("mesh controller reserves the next sequence number before writing to BLE", 
   );
 
   const raw = JSON.parse(await readFile(statePath, "utf8")) as { sequence_number: number };
-  expect(raw.sequence_number).toBe(9);
+  expect(raw.sequence_number).toBe(10);
 });
 
 test("mesh controller wakes a soft-off fixture before restoring its brightness and color", async () => {
@@ -170,8 +170,8 @@ test("mesh controller wakes a soft-off fixture before restoring its brightness a
   );
   expect(powered).toBe(true);
   expect(brightness).toBe(30);
-  expect(sequences).toEqual([7, 8, 9]);
-  expect((await Effect.runPromise(loadMeshState(statePath))).sequenceNumber).toBe(10);
+  expect(sequences).toEqual([7, 8, 9, 10, 11]);
+  expect((await Effect.runPromise(loadMeshState(statePath))).sequenceNumber).toBe(12);
 });
 
 test("mesh controller serializes concurrent sends so each command reserves a unique sequence number", async () => {
@@ -193,7 +193,7 @@ test("mesh controller serializes concurrent sends so each command reserves a uni
   );
 
   const state = await Effect.runPromise(loadMeshState(statePath));
-  expect(state.sequenceNumber).toBe(23);
+  expect(state.sequenceNumber).toBe(31);
 });
 
 test("mesh controller coalesces queued sends and reuses a warm proxy writer", async () => {
@@ -396,8 +396,8 @@ test("mesh controller serializes queued sends when coalescing is disabled", asyn
   const state = await Effect.runPromise(loadMeshState(statePath));
   expect(writeCountBeforeRelease).toBe(1);
   expect(maxConcurrentWritesBeforeRelease).toBe(1);
-  expect(state.sequenceNumber).toBe(13);
-  expect(writeCount).toBe(6);
+  expect(state.sequenceNumber).toBe(12);
+  expect(writeCount).toBe(5);
   expect(connectCount).toBe(1);
 });
 
@@ -471,7 +471,7 @@ test("mesh controller times out a hung GATT write and closes the writer", async 
   expect(exit._tag).toBe("Failure");
   expect(writeCount).toBe(2);
   expect(disconnectCount).toBe(2);
-  expect(state.sequenceNumber).toBe(11);
+  expect(state.sequenceNumber).toBe(13);
 }, 10_000);
 
 test("mesh controller allows the peripheral scan timeout to be shortened", async () => {
