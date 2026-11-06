@@ -2,7 +2,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Domain } from "@godox-tl/core";
-import { Cause, Effect } from "effect";
+import { Cause, Clock, Deferred, Effect, Fiber } from "effect";
+import { TestClock } from "effect/testing";
 import { afterEach, beforeEach, expect, test, vi } from "vite-plus/test";
 import { BleError } from "../src/ble/errors.ts";
 import { connectProxyWriter } from "../src/ble/proxy.ts";
@@ -55,69 +56,104 @@ const makeWriter = (write: ProxyWriterConnection["write"], isConnected = () => t
     close: vi.fn(() => Effect.void),
   }) satisfies ProxyWriterConnection;
 
+// Install the tracking scheduler as well as the clock. The controller captures
+// this context for its Promise-backed send queue and detached cleanup effects.
+const runWithTestClock = <A, E>(effect: Effect.Effect<A, E>) =>
+  Effect.runPromise(Effect.provide(effect, TestClock.layer()));
+
 test("reopens a disconnected cached writer before another command", async () => {
-  let connected = true;
-  const firstWrites: number[] = [];
-  const nextWrites: number[] = [];
-  const first = makeWriter(
-    (pdu) =>
-      Effect.sync(() => {
-        firstWrites.push(sequence(pdu));
-      }),
-    () => connected,
-  );
-  const next = makeWriter((pdu) =>
-    Effect.sync(() => {
-      nextWrites.push(sequence(pdu));
+  await runWithTestClock(
+    Effect.gen(function* () {
+      let connected = true;
+      const firstWrites: number[] = [];
+      const nextWrites: number[] = [];
+      const firstStarted = yield* Deferred.make<void>();
+      const nextStarted = yield* Deferred.make<void>();
+      const first = makeWriter(
+        (pdu) =>
+          Effect.sync(() => firstWrites.push(sequence(pdu))).pipe(
+            Effect.andThen(Deferred.succeed(firstStarted, undefined)),
+            Effect.asVoid,
+          ),
+        () => connected,
+      );
+      const next = makeWriter((pdu) =>
+        Effect.sync(() => nextWrites.push(sequence(pdu))).pipe(
+          Effect.andThen(Deferred.succeed(nextStarted, undefined)),
+          Effect.asVoid,
+        ),
+      );
+      connect.mockReturnValueOnce(Effect.succeed(first)).mockReturnValueOnce(Effect.succeed(next));
+      const controller = makeMeshController({ address: "test-light", statePath });
+
+      const initial = yield* Effect.forkChild(controller.send(command));
+      yield* Deferred.await(firstStarted);
+      yield* TestClock.adjust("300 millis");
+      yield* Fiber.join(initial);
+      const firstCount = firstWrites.length;
+      const nextSequence = (yield* loadMeshState(statePath)).sequenceNumber;
+      connected = false;
+      const following = yield* Effect.forkChild(controller.send(command));
+      yield* Deferred.await(nextStarted);
+      yield* TestClock.adjust("300 millis");
+      yield* Fiber.join(following);
+
+      expect(connect).toHaveBeenCalledTimes(2);
+      expect(first.close).toHaveBeenCalledTimes(1);
+      expect(firstWrites).toHaveLength(firstCount);
+      expect(nextWrites[0]).toBe(nextSequence);
     }),
   );
-  connect.mockReturnValueOnce(Effect.succeed(first)).mockReturnValueOnce(Effect.succeed(next));
-  const controller = makeMeshController({ address: "test-light", statePath });
-
-  await Effect.runPromise(controller.send(command));
-  const firstCount = firstWrites.length;
-  const nextSequence = (await Effect.runPromise(loadMeshState(statePath))).sequenceNumber;
-  connected = false;
-  await Effect.runPromise(controller.send(command));
-
-  expect(connect).toHaveBeenCalledTimes(2);
-  expect(first.close).toHaveBeenCalledTimes(1);
-  expect(firstWrites).toHaveLength(firstCount);
-  expect(nextWrites[0]).toBe(nextSequence);
 });
 
 test("retries a failed cached writer with fresh sequence numbers", async () => {
-  let failWrites = false;
-  const attempts: number[] = [];
-  const recovered: number[] = [];
-  const cached = makeWriter((pdu) =>
-    Effect.sync(() => attempts.push(sequence(pdu))).pipe(
-      Effect.andThen(
-        Effect.suspend(() =>
-          failWrites ? Effect.fail(new BleError({ message: "link dropped" })) : Effect.void,
+  await runWithTestClock(
+    Effect.gen(function* () {
+      let failWrites = false;
+      const attempts: number[] = [];
+      const recovered: number[] = [];
+      const cachedStarted = yield* Deferred.make<void>();
+      const freshStarted = yield* Deferred.make<void>();
+      const cached = makeWriter((pdu) =>
+        Effect.sync(() => attempts.push(sequence(pdu))).pipe(
+          Effect.andThen(Deferred.succeed(cachedStarted, undefined)),
+          Effect.andThen(
+            Effect.suspend(() =>
+              failWrites ? Effect.fail(new BleError({ message: "link dropped" })) : Effect.void,
+            ),
+          ),
         ),
-      ),
-    ),
-  );
-  const fresh = makeWriter((pdu) =>
-    Effect.sync(() => {
-      recovered.push(sequence(pdu));
+      );
+      const fresh = makeWriter((pdu) =>
+        Effect.sync(() => recovered.push(sequence(pdu))).pipe(
+          Effect.andThen(Deferred.succeed(freshStarted, undefined)),
+          Effect.asVoid,
+        ),
+      );
+      connect
+        .mockReturnValueOnce(Effect.succeed(cached))
+        .mockReturnValueOnce(Effect.succeed(fresh));
+      const controller = makeMeshController({ address: "test-light", statePath });
+
+      const initial = yield* Effect.forkChild(controller.send(command));
+      yield* Deferred.await(cachedStarted);
+      yield* TestClock.adjust("300 millis");
+      yield* Fiber.join(initial);
+      const beforeFailure = (yield* loadMeshState(statePath)).sequenceNumber;
+      failWrites = true;
+      const retry = yield* Effect.forkChild(controller.send(command));
+      yield* Deferred.await(freshStarted);
+      yield* TestClock.adjust("300 millis");
+      yield* Fiber.join(retry);
+
+      expect(connect).toHaveBeenCalledTimes(2);
+      expect(cached.close).toHaveBeenCalledTimes(1);
+      expect(attempts.at(-1)).toBe(beforeFailure);
+      expect(recovered[0]).toBeGreaterThan(beforeFailure);
+      const nextSequence = (yield* loadMeshState(statePath)).sequenceNumber;
+      expect(recovered.at(-1)).toBe(nextSequence - 1);
     }),
   );
-  connect.mockReturnValueOnce(Effect.succeed(cached)).mockReturnValueOnce(Effect.succeed(fresh));
-  const controller = makeMeshController({ address: "test-light", statePath });
-
-  await Effect.runPromise(controller.send(command));
-  const beforeFailure = (await Effect.runPromise(loadMeshState(statePath))).sequenceNumber;
-  failWrites = true;
-  await Effect.runPromise(controller.send(command));
-
-  expect(connect).toHaveBeenCalledTimes(2);
-  expect(cached.close).toHaveBeenCalledTimes(1);
-  expect(attempts.at(-1)).toBe(beforeFailure);
-  expect(recovered[0]).toBeGreaterThan(beforeFailure);
-  const nextSequence = (await Effect.runPromise(loadMeshState(statePath))).sequenceNumber;
-  expect(recovered.at(-1)).toBe(nextSequence - 1);
 });
 
 test("a second BLE failure stops after one retry", async () => {
@@ -142,47 +178,109 @@ test("a second BLE failure stops after one retry", async () => {
 });
 
 test("the retry shares the original overall send deadline", async () => {
-  vi.useFakeTimers();
-  let firstStarted: (() => void) | undefined;
-  let secondStarted: (() => void) | undefined;
-  const firstSignal = new Promise<void>((resolve) => {
-    firstStarted = resolve;
-  });
-  const secondSignal = new Promise<void>((resolve) => {
-    secondStarted = resolve;
-  });
-  const first = makeWriter(() =>
-    Effect.sync(() => firstStarted?.()).pipe(
-      Effect.andThen(Effect.sleep("35 millis")),
-      Effect.andThen(Effect.fail(new BleError({ message: "link dropped" }))),
-    ),
-  );
-  const second = makeWriter(() =>
-    Effect.sync(() => secondStarted?.()).pipe(Effect.andThen(Effect.never)),
-  );
-  connect.mockReturnValueOnce(Effect.succeed(first)).mockReturnValueOnce(Effect.succeed(second));
-  const controller = makeMeshController({
-    address: "test-light",
-    statePath,
-    sendTimeoutMs: 60,
-    writeTimeoutMs: 500,
-  });
-  let settled = false;
-  const result = Effect.runPromiseExit(controller.send(command)).then((exit) => {
-    settled = true;
-    return exit;
-  });
+  await runWithTestClock(
+    Effect.gen(function* () {
+      const firstStarted = yield* Deferred.make<void>();
+      const secondStarted = yield* Deferred.make<void>();
+      const settled = yield* Deferred.make<void>();
+      const first = makeWriter(() =>
+        Deferred.succeed(firstStarted, undefined).pipe(
+          Effect.andThen(Effect.sleep("35 millis")),
+          Effect.andThen(Effect.fail(new BleError({ message: "link dropped" }))),
+        ),
+      );
+      const second = makeWriter(() =>
+        Deferred.succeed(secondStarted, undefined).pipe(Effect.andThen(Effect.never)),
+      );
+      connect
+        .mockReturnValueOnce(Effect.succeed(first))
+        .mockReturnValueOnce(Effect.succeed(second));
+      const controller = makeMeshController({
+        address: "test-light",
+        statePath,
+        sendTimeoutMs: 60,
+        writeTimeoutMs: 500,
+      });
+      const result = yield* controller.send(command).pipe(
+        Effect.exit,
+        Effect.tap(() => Deferred.succeed(settled, undefined)),
+        Effect.forkChild,
+      );
 
-  await firstSignal;
-  await vi.advanceTimersByTimeAsync(35);
-  await secondSignal;
-  await vi.advanceTimersByTimeAsync(24);
-  expect(settled).toBe(false);
-  await vi.advanceTimersByTimeAsync(1);
+      yield* Deferred.await(firstStarted);
+      yield* TestClock.adjust("35 millis");
+      // Allow real filesystem allocation/release to finish before advancing the
+      // Effect clock again; the retry must already be writing at the old deadline.
+      yield* Deferred.await(secondStarted);
+      yield* TestClock.adjust("24 millis");
+      expect(yield* Deferred.isDone(settled)).toBe(false);
+      yield* TestClock.adjust("1 millis");
+      const failure = yield* Fiber.join(result);
 
-  expect((await result)._tag).toBe("Failure");
-  expect(connect).toHaveBeenCalledTimes(2);
-  expect(second.close).toHaveBeenCalledTimes(1);
+      expect(failure._tag).toBe("Failure");
+      if (failure._tag === "Failure")
+        expect(Cause.pretty(failure.cause)).toContain("timed out after 60ms");
+      expect(yield* Clock.currentTimeMillis).toBe(60);
+      expect(connect).toHaveBeenCalledTimes(2);
+      expect(second.close).toHaveBeenCalledTimes(1);
+    }),
+  );
+});
+
+test("write timeouts retry once with fresh sequences and stop at the second timeout", async () => {
+  await runWithTestClock(
+    Effect.gen(function* () {
+      const firstStarted = yield* Deferred.make<void>();
+      const secondStarted = yield* Deferred.make<void>();
+      const settled = yield* Deferred.make<void>();
+      const attempts: number[] = [];
+      const blockedWriter = (started: Deferred.Deferred<void>) =>
+        makeWriter((pdu) =>
+          Effect.sync(() => attempts.push(sequence(pdu))).pipe(
+            Effect.andThen(Deferred.succeed(started, undefined)),
+            Effect.andThen(Effect.never),
+          ),
+        );
+      const first = blockedWriter(firstStarted);
+      const second = blockedWriter(secondStarted);
+      connect
+        .mockReturnValueOnce(Effect.succeed(first))
+        .mockReturnValueOnce(Effect.succeed(second));
+      const controller = makeMeshController({
+        address: "test-light",
+        statePath,
+        writeTimeoutMs: 50,
+        sendTimeoutMs: 1000,
+      });
+      const result = yield* controller.send(command).pipe(
+        Effect.exit,
+        Effect.tap(() => Deferred.succeed(settled, undefined)),
+        Effect.forkChild,
+      );
+      yield* Deferred.await(firstStarted);
+      yield* TestClock.adjust("49 millis");
+      expect(first.close).not.toHaveBeenCalled();
+      expect(connect).toHaveBeenCalledTimes(1);
+      expect(yield* Deferred.isDone(settled)).toBe(false);
+      yield* TestClock.adjust("1 millis");
+      yield* Deferred.await(secondStarted);
+      expect(first.close).toHaveBeenCalledTimes(1);
+      yield* TestClock.adjust("49 millis");
+      expect(second.close).not.toHaveBeenCalled();
+      expect(yield* Deferred.isDone(settled)).toBe(false);
+      yield* TestClock.adjust("1 millis");
+      const failure = yield* Fiber.join(result);
+
+      expect(failure._tag).toBe("Failure");
+      if (failure._tag === "Failure")
+        expect(Cause.pretty(failure.cause)).toContain("write timed out after 50ms");
+      expect(yield* Clock.currentTimeMillis).toBe(100);
+      expect(connect).toHaveBeenCalledTimes(2);
+      expect(second.close).toHaveBeenCalledTimes(1);
+      expect(attempts).toHaveLength(2);
+      expect(attempts[1]).toBeGreaterThan(attempts[0]!);
+    }),
+  );
 });
 
 test("state-file failures do not trigger a BLE reconnect retry", async () => {
@@ -215,6 +313,7 @@ const deferred = () => {
 };
 
 test("a new send joins idle cleanup before replacing the same peripheral", async () => {
+  // Idle close uses Node's setTimeout, so this test needs native timer control.
   vi.useFakeTimers();
   const firstWrite = deferred();
   const closeStarted = deferred();
@@ -258,112 +357,151 @@ test("a new send joins idle cleanup before replacing the same peripheral", async
 });
 
 test("timeout cleanup cannot retry an old close after a queued replacement connects", async () => {
-  vi.useFakeTimers();
-  const closeStarted = deferred();
-  const secondCloseStarted = deferred();
-  const secondCloseReleased = deferred();
-  const replacementWrite = deferred();
-  const events: string[] = [];
-  let closeAttempts = 0;
-  const first = {
-    ...makeWriter(() => Effect.fail(new BleError({ message: "link dropped" }))),
-    close: vi.fn<ProxyWriterConnection["close"]>(() =>
-      Effect.suspend(() => {
-        closeAttempts++;
-        events.push(`old-close-${closeAttempts}`);
-        closeStarted.resolve();
-        if (closeAttempts === 1) return Effect.never;
-        secondCloseStarted.resolve();
-        return Effect.promise(() => secondCloseReleased.promise);
-      }),
-    ),
-  };
-  connect.mockReturnValueOnce(Effect.succeed(first)).mockReturnValueOnce(
-    Effect.sync(() => {
-      events.push("replacement-connect");
-      return makeWriter(() => Effect.sync(() => replacementWrite.resolve()));
+  await runWithTestClock(
+    Effect.gen(function* () {
+      const closeStarted = yield* Deferred.make<void>();
+      const secondCloseStarted = yield* Deferred.make<void>();
+      const secondCloseReleased = yield* Deferred.make<void>();
+      const replacementWrite = yield* Deferred.make<void>();
+      const settled = yield* Deferred.make<void>();
+      const events: string[] = [];
+      let closeAttempts = 0;
+      const first = {
+        ...makeWriter(() => Effect.fail(new BleError({ message: "link dropped" }))),
+        close: vi.fn<ProxyWriterConnection["close"]>(() =>
+          Effect.gen(function* () {
+            closeAttempts++;
+            events.push(`old-close-${closeAttempts}`);
+            yield* Deferred.succeed(closeStarted, undefined);
+            if (closeAttempts === 1) return yield* Effect.never;
+            yield* Deferred.succeed(secondCloseStarted, undefined);
+            yield* Deferred.await(secondCloseReleased);
+          }),
+        ),
+      };
+      connect.mockReturnValueOnce(Effect.succeed(first)).mockReturnValueOnce(
+        Effect.sync(() => {
+          events.push("replacement-connect");
+          return makeWriter(() =>
+            Deferred.succeed(replacementWrite, undefined).pipe(Effect.asVoid),
+          );
+        }),
+      );
+      const controller = makeMeshController({
+        address: "test-light",
+        statePath,
+        sendTimeoutMs: 500,
+      });
+      const failing = yield* controller.send(command).pipe(
+        Effect.exit,
+        Effect.tap(() => Deferred.succeed(settled, undefined)),
+        Effect.forkChild,
+      );
+      yield* Deferred.await(closeStarted);
+      const queued = yield* Effect.forkChild(controller.send(Domain.Off.make({})));
+      yield* TestClock.adjust("500 millis");
+      expect(yield* Deferred.isDone(settled)).toBe(false);
+      expect(connect).toHaveBeenCalledTimes(1);
+      yield* TestClock.adjust("2499 millis");
+      expect(closeAttempts).toBe(1);
+      yield* TestClock.adjust("1 millis");
+      yield* Deferred.await(secondCloseStarted);
+      expect(connect).toHaveBeenCalledTimes(1);
+      yield* Deferred.succeed(secondCloseReleased, undefined);
+      const failure = yield* Fiber.join(failing);
+      expect(failure._tag).toBe("Failure");
+      if (failure._tag === "Failure")
+        expect(Cause.pretty(failure.cause)).toContain("timed out after 500ms");
+      yield* Deferred.await(replacementWrite);
+      yield* TestClock.adjust("200 millis");
+      yield* Fiber.join(queued);
+      yield* TestClock.adjust("3000 millis");
+
+      expect(events).toEqual(["old-close-1", "old-close-2", "replacement-connect"]);
+      expect(connect).toHaveBeenCalledTimes(2);
     }),
   );
-  const controller = makeMeshController({ address: "test-light", statePath, sendTimeoutMs: 500 });
-  let settled = false;
-  const failing = Effect.runPromiseExit(controller.send(command)).then((result) => {
-    settled = true;
-    return result;
-  });
-  await closeStarted.promise;
-  const queued = Effect.runPromise(controller.send(Domain.Off.make({})));
-  await vi.advanceTimersByTimeAsync(500);
-  expect(settled).toBe(false);
-  expect(connect).toHaveBeenCalledTimes(1);
-  await vi.advanceTimersByTimeAsync(2500);
-  await secondCloseStarted.promise;
-  expect(connect).toHaveBeenCalledTimes(1);
-  secondCloseReleased.resolve();
-  const failure = await failing;
-  expect(failure._tag).toBe("Failure");
-  if (failure._tag === "Failure")
-    expect(Cause.pretty(failure.cause)).toContain("timed out after 500ms");
-  await replacementWrite.promise;
-  await vi.advanceTimersByTimeAsync(200);
-  await queued;
-  await vi.advanceTimersByTimeAsync(3000);
-
-  expect(events).toEqual(["old-close-1", "old-close-2", "replacement-connect"]);
-  expect(connect).toHaveBeenCalledTimes(2);
 });
 
-test("failed cleanup fences replacement until a later native disconnect completes", async () => {
-  vi.useFakeTimers();
-  const closeStarted = deferred();
-  const writeStarted = deferred();
-  const nativeDisconnect = deferred();
-  const replacementWrite = deferred();
-  let closeAttempts = 0;
-  const first = {
-    ...makeWriter(() =>
-      Effect.sync(() => writeStarted.resolve()).pipe(Effect.andThen(Effect.never)),
-    ),
-    close: vi.fn<ProxyWriterConnection["close"]>(() =>
-      Effect.sync(() => {
-        closeAttempts++;
-        closeStarted.resolve();
-      }).pipe(Effect.andThen(Effect.promise(() => nativeDisconnect.promise))),
-    ),
-  };
-  connect
-    .mockReturnValueOnce(Effect.succeed(first))
-    .mockReturnValueOnce(
-      Effect.succeed(makeWriter(() => Effect.sync(() => replacementWrite.resolve()))),
-    );
-  const controller = makeMeshController({ address: "test-light", statePath, sendTimeoutMs: 500 });
-  const failing = Effect.runPromiseExit(controller.send(command));
-  await writeStarted.promise;
-  const startedAt = Date.now();
-  await vi.advanceTimersByTimeAsync(500);
-  await closeStarted.promise;
-  await vi.advanceTimersByTimeAsync(6000);
-  const failure = await failing;
-  expect(Date.now() - startedAt).toBe(6500);
-  expect(failure._tag).toBe("Failure");
-  if (failure._tag === "Failure")
-    expect(Cause.pretty(failure.cause)).toContain("timed out after 500ms");
-  expect(closeAttempts).toBe(2);
-  expect(connect).toHaveBeenCalledTimes(1);
+test("failed cleanup fences replacement until a later close completes", async () => {
+  await runWithTestClock(
+    Effect.gen(function* () {
+      const closeStarted = yield* Deferred.make<void>();
+      const secondCloseStarted = yield* Deferred.make<void>();
+      const writeStarted = yield* Deferred.make<void>();
+      const closeReleased = yield* Deferred.make<void>();
+      const replacementWrite = yield* Deferred.make<void>();
+      const settled = yield* Deferred.make<void>();
+      let closeAttempts = 0;
+      const first = {
+        ...makeWriter(() =>
+          Deferred.succeed(writeStarted, undefined).pipe(Effect.andThen(Effect.never)),
+        ),
+        close: vi.fn<ProxyWriterConnection["close"]>(() =>
+          Effect.gen(function* () {
+            closeAttempts++;
+            yield* Deferred.succeed(closeStarted, undefined);
+            if (closeAttempts === 2) yield* Deferred.succeed(secondCloseStarted, undefined);
+            yield* Deferred.await(closeReleased);
+          }),
+        ),
+      };
+      connect
+        .mockReturnValueOnce(Effect.succeed(first))
+        .mockReturnValueOnce(
+          Effect.succeed(
+            makeWriter(() => Deferred.succeed(replacementWrite, undefined).pipe(Effect.asVoid)),
+          ),
+        );
+      const controller = makeMeshController({
+        address: "test-light",
+        statePath,
+        sendTimeoutMs: 500,
+      });
+      const failing = yield* controller.send(command).pipe(
+        Effect.exit,
+        Effect.tap(() => Deferred.succeed(settled, undefined)),
+        Effect.forkChild,
+      );
+      yield* Deferred.await(writeStarted);
+      yield* TestClock.adjust("499 millis");
+      expect(closeAttempts).toBe(0);
+      yield* TestClock.adjust("1 millis");
+      yield* Deferred.await(closeStarted);
+      yield* TestClock.adjust("2999 millis");
+      expect(closeAttempts).toBe(1);
+      expect(yield* Deferred.isDone(settled)).toBe(false);
+      yield* TestClock.adjust("1 millis");
+      yield* Deferred.await(secondCloseStarted);
+      yield* TestClock.adjust("2999 millis");
+      expect(closeAttempts).toBe(2);
+      expect(yield* Deferred.isDone(settled)).toBe(false);
+      yield* TestClock.adjust("1 millis");
+      const failure = yield* Fiber.join(failing);
+      expect(yield* Clock.currentTimeMillis).toBe(6500);
+      expect(failure._tag).toBe("Failure");
+      if (failure._tag === "Failure")
+        expect(Cause.pretty(failure.cause)).toContain("timed out after 500ms");
+      expect(closeAttempts).toBe(2);
+      expect(connect).toHaveBeenCalledTimes(1);
 
-  const recovering = Effect.runPromise(controller.send(Domain.Off.make({})));
-  await vi.advanceTimersByTimeAsync(100);
-  expect(connect).toHaveBeenCalledTimes(1);
-  nativeDisconnect.resolve();
-  await replacementWrite.promise;
-  await vi.advanceTimersByTimeAsync(200);
-  await recovering;
-  await vi.advanceTimersByTimeAsync(3000);
+      const recovering = yield* Effect.forkChild(controller.send(Domain.Off.make({})));
+      yield* TestClock.adjust("100 millis");
+      expect(connect).toHaveBeenCalledTimes(1);
+      yield* Deferred.succeed(closeReleased, undefined);
+      yield* Deferred.await(replacementWrite);
+      yield* TestClock.adjust("200 millis");
+      yield* Fiber.join(recovering);
+      yield* TestClock.adjust("3000 millis");
 
-  expect(closeAttempts).toBe(3);
-  expect(connect).toHaveBeenCalledTimes(2);
+      expect(closeAttempts).toBe(3);
+      expect(connect).toHaveBeenCalledTimes(2);
+    }),
+  );
 });
 
 test("a timed-out write holds the source lease until disconnect cleanup finishes", async () => {
+  // The shared filesystem lease polls using native timers; keep this test live.
   const firstWrite = deferred();
   const closeStarted = deferred();
   const closeReleased = deferred();
