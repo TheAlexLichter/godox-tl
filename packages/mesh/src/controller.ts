@@ -492,27 +492,33 @@ export const makeMeshController = (options: MeshControllerOptions): MeshControll
     close: () =>
       Effect.uninterruptible(
         Effect.gen(function* () {
-          if (!closeResult) {
-            closed = true;
-            clearIdleTimer();
-            settle(
-              pending.flatMap((send) => send.waiters),
-              closedError(),
-            );
-            pending = [];
-            const services = yield* Effect.context<never>();
-            // Stop and await sends first: their finalizers hold the source lease
-            // through disconnect. Cleanup fibers must survive that interruption.
-            closeResult = Effect.runPromiseWith(services)(
-              Effect.gen(function* () {
-                yield* Scope.close(sendScope, Exit.void);
-                yield* closeWriter();
-                yield* Scope.close(cleanupScope, Exit.void);
-                if (inFlight) yield* Effect.promise(() => inFlight!);
-              }),
-            );
-          }
-          yield* Effect.promise(() => closeResult!);
+          const services = yield* Effect.context<never>();
+          const result = yield* Effect.sync(() => {
+            if (!closeResult) {
+              closed = true;
+              clearIdleTimer();
+              settle(
+                pending.flatMap((send) => send.waiters),
+                closedError(),
+              );
+              pending = [];
+              // Publish the latch before starting cleanup, including synchronous
+              // callbacks in a disconnect implementation.
+              closeResult = Promise.resolve().then(() =>
+                Effect.runPromiseWith(services)(
+                  Effect.gen(function* () {
+                    // Send finalizers retain the source lease through disconnect.
+                    yield* Scope.close(sendScope, Exit.void);
+                    yield* closeWriter();
+                    yield* Scope.close(cleanupScope, Exit.void);
+                    if (inFlight) yield* Effect.promise(() => inFlight!);
+                  }),
+                ),
+              );
+            }
+            return closeResult;
+          });
+          yield* Effect.promise(() => result);
         }),
       ),
   };

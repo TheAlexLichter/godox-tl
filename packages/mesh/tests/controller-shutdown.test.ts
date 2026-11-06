@@ -2,7 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Domain, LightController } from "@godox-tl/core";
-import { Effect, Exit, Scope } from "effect";
+import { Effect, Exit, References, Scope } from "effect";
 import { afterEach, beforeEach, expect, test, vi } from "vite-plus/test";
 import { connectProxyWriter } from "../src/ble/proxy.ts";
 import {
@@ -208,4 +208,36 @@ test("shutdown owns a connection returned at the cancellation boundary", async (
   await stopping;
   expect(write).not.toHaveBeenCalled();
   expect(close).toHaveBeenCalledTimes(1);
+});
+
+test("concurrent close callers share one cleanup even when the scheduler yields frequently", async () => {
+  const cleaning = signal();
+  const release = signal();
+  const close = vi.fn(() =>
+    Effect.sync(cleaning.resolve).pipe(Effect.andThen(Effect.promise(() => release.promise))),
+  );
+  connect.mockReturnValue(
+    Effect.succeed({ address: "test-light", write: () => Effect.void, close }),
+  );
+  const c = controller();
+  await Effect.runPromise(c.send(command));
+  try {
+    let finished = 0;
+    const calls = Array.from({ length: 16 }, () =>
+      Effect.runPromise(
+        c.close().pipe(Effect.provideService(References.MaxOpsBeforeYield, 8)),
+      ).then(() => {
+        finished++;
+      }),
+    );
+    await cleaning.promise;
+    expect(finished).toBe(0);
+    expect(Exit.isFailure(await Effect.runPromiseExit(c.send(command)))).toBe(true);
+    release.resolve();
+    await Promise.all(calls);
+    expect(finished).toBe(16);
+    expect(close).toHaveBeenCalledTimes(1);
+  } finally {
+    release.resolve();
+  }
 });
