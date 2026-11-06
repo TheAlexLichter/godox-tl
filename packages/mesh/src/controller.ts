@@ -2,6 +2,7 @@
 // proxy PDU via the access-frame encoder, writes it over a cached write-only
 // Mesh Proxy connection, and persists the bumped sequence number.
 
+import { randomUUID } from "node:crypto";
 import { Domain, LightController, TransportError, TransportUnsupportedError } from "@godox-tl/core";
 import { Duration, Effect, Exit, FiberSet, Match, Scope, type Context } from "effect";
 import { connectProxyWriter } from "./ble/proxy.ts";
@@ -17,8 +18,10 @@ import {
   VENDOR_OPCODE,
 } from "./godox/protocol.ts";
 import { encodeGodoxFrame } from "./pdu/accessFrame.ts";
+import { commandPhase } from "./diagnostics.ts";
 import { loadMeshState } from "./state.ts";
 import { withMeshSequenceReservation, type SequenceOptions } from "./sequences.ts";
+import { makeCommandQueue } from "./commandQueue.ts";
 
 type LightControllerService = LightController["Service"];
 
@@ -83,17 +86,6 @@ const buildPayload = (
     }),
   );
 
-interface SendWaiter {
-  readonly resolve: () => void;
-  readonly reject: (error: unknown) => void;
-}
-
-interface PendingSend {
-  readonly cmd: Domain.LightCommand;
-  readonly waiters: ReadonlyArray<SendWaiter>;
-  readonly services: Context.Context<never>;
-}
-
 interface PendingWriterClose {
   readonly writer: ProxyWriterConnection;
   readonly result: Promise<Exit.Exit<void, BleError>>;
@@ -145,8 +137,6 @@ export const makeMeshController = (options: MeshControllerOptions): MeshControll
 
   let writer: ProxyWriterConnection | undefined;
   let idleTimer: NodeJS.Timeout | undefined;
-  let inFlight: Promise<void> | undefined;
-  let pending: ReadonlyArray<PendingSend> = [];
   let powerState: "unknown" | "on" | "off" = "unknown";
   let powerConfidenceSource: string | undefined;
   let powerConfidenceNextSequence: number | undefined;
@@ -205,9 +195,12 @@ export const makeMeshController = (options: MeshControllerOptions): MeshControll
             cleanups,
             services,
             Effect.exit(
-              attempt.pipe(
-                Effect.catchCause(() => attempt),
-                Effect.interruptible,
+              commandPhase(
+                "cleanup",
+                attempt.pipe(
+                  Effect.catchCause(() => attempt),
+                  Effect.interruptible,
+                ),
               ),
             ),
           ),
@@ -266,13 +259,16 @@ export const makeMeshController = (options: MeshControllerOptions): MeshControll
     };
     return Effect.logDebug(`[mesh] opening writer for ${options.address}`).pipe(
       Effect.andThen(
-        connectProxyWriter(
-          options.address,
-          {
-            fallbackAddresses: options.proxyAddresses,
-            findPeripheralTimeoutMs,
-          },
-          ownWriter,
+        commandPhase(
+          "connect",
+          connectProxyWriter(
+            options.address,
+            {
+              fallbackAddresses: options.proxyAddresses,
+              findPeripheralTimeoutMs,
+            },
+            ownWriter,
+          ),
         ),
       ),
       // Keep compatibility with injected connectors that only return a handle.
@@ -296,17 +292,23 @@ export const makeMeshController = (options: MeshControllerOptions): MeshControll
     Effect.suspend(() => {
       // Only a new queued command can retry a previously failed cleanup. Error
       // handlers for this command join it, keeping cleanup grace bounded to 6s.
+      let attempt = 1;
       const recoverPreviousClose = closing?.settled ? closeWriter(true) : Effect.void;
       return recoverPreviousClose.pipe(
         Effect.andThen(
-          sendNow(cmd).pipe(
+          commandPhase("send", sendNow(cmd), { "mesh.attempt": 1 }).pipe(
             Effect.catch((error) => {
               if (!(error instanceof TransportError) || !(error.cause instanceof BleError)) {
                 return Effect.fail(error);
               }
-              return Effect.logDebug(
-                `[mesh] retrying ${cmd._tag} on a fresh writer for ${options.address}`,
-              ).pipe(Effect.andThen(closeWriter()), Effect.andThen(sendNow(cmd)));
+              attempt = 2;
+              return commandPhase(
+                "retry",
+                Effect.logDebug(
+                  `[mesh] retrying ${cmd._tag} on a fresh writer for ${options.address}`,
+                ).pipe(Effect.andThen(closeWriter()), Effect.andThen(sendNow(cmd))),
+                { "mesh.attempt": attempt },
+              );
             }),
           ),
         ),
@@ -320,7 +322,10 @@ export const makeMeshController = (options: MeshControllerOptions): MeshControll
               ),
             ),
         }),
-        Effect.tapError(() => closeWriter()),
+        Effect.tapError(() => closeWriter().pipe(Effect.annotateLogs("mesh.attempt", attempt))),
+        // A cancelled active command may be waiting for the source lock after
+        // opening a writer; no lease callback exists yet to close that writer.
+        Effect.onInterrupt(() => closeWriter().pipe(Effect.annotateLogs("mesh.attempt", attempt))),
       );
     });
 
@@ -328,30 +333,35 @@ export const makeMeshController = (options: MeshControllerOptions): MeshControll
     conn: ProxyWriterConnection,
     proxyPdus: ReadonlyArray<Uint8Array>,
   ): Effect.Effect<void, TransportError> =>
-    Effect.gen(function* () {
-      const startedAt = Date.now();
-      for (const proxyPdu of proxyPdus) {
-        if (closed) return yield* Effect.fail(closedError());
-        yield* Effect.logDebug(`[mesh] writing ${proxyPdu.byteLength} bytes to ${options.address}`);
-        yield* conn.write(proxyPdu).pipe(
-          Effect.mapError((e) => transportError(options.address, e)),
-          Effect.timeoutOrElse({
-            duration: Duration.millis(writeTimeoutMs),
-            orElse: () =>
-              Effect.fail(
-                transportError(
-                  options.address,
-                  new BleError({ message: `write timed out after ${writeTimeoutMs}ms` }),
+    commandPhase(
+      "write",
+      Effect.gen(function* () {
+        const startedAt = Date.now();
+        for (const proxyPdu of proxyPdus) {
+          if (closed) return yield* Effect.fail(closedError());
+          yield* Effect.logDebug(
+            `[mesh] writing ${proxyPdu.byteLength} bytes to ${options.address}`,
+          );
+          yield* conn.write(proxyPdu).pipe(
+            Effect.mapError((e) => transportError(options.address, e)),
+            Effect.timeoutOrElse({
+              duration: Duration.millis(writeTimeoutMs),
+              orElse: () =>
+                Effect.fail(
+                  transportError(
+                    options.address,
+                    new BleError({ message: `write timed out after ${writeTimeoutMs}ms` }),
+                  ),
                 ),
-              ),
-          }),
+            }),
+          );
+          yield* Effect.sleep("100 millis");
+        }
+        yield* Effect.logDebug(
+          `[mesh] write complete for ${options.address} in ${Date.now() - startedAt}ms`,
         );
-        yield* Effect.sleep("100 millis");
-      }
-      yield* Effect.logDebug(
-        `[mesh] write complete for ${options.address} in ${Date.now() - startedAt}ms`,
-      );
-    });
+      }),
+    );
 
   const sendNow = (
     cmd: Domain.LightCommand,
@@ -432,63 +442,35 @@ export const makeMeshController = (options: MeshControllerOptions): MeshControll
       );
     });
 
-  const settle = (waiters: ReadonlyArray<SendWaiter>, error?: unknown): void => {
-    for (const waiter of waiters) {
-      if (error) {
-        waiter.reject(error);
-      } else {
-        waiter.resolve();
-      }
-    }
-  };
+  const mailbox = Effect.runSync(
+    makeCommandQueue<Domain.LightCommand, TransportError | TransportUnsupportedError>({
+      coalesce,
+      closedError,
+      execute: withSendTimeout,
+    }).pipe(Scope.provide(sendScope)),
+  );
 
-  const runQueued = (
-    cmd: Domain.LightCommand,
-    waiters: ReadonlyArray<SendWaiter>,
-    services: Context.Context<never>,
-  ): void => {
-    inFlight = runManaged(sends, services, withSendTimeout(cmd))
-      .then(() => settle(waiters))
-      .catch((error: unknown) => settle(waiters, closed ? closedError() : error))
-      .then(() => {
-        const [next, ...rest] = pending;
-        pending = rest;
-        if (next && !closed) {
-          runQueued(next.cmd, next.waiters, next.services);
-        } else {
-          inFlight = undefined;
-        }
-      });
-  };
-  const enqueue = (cmd: Domain.LightCommand, services: Context.Context<never>): Promise<void> =>
-    new Promise<void>((resolve, reject) => {
-      if (closed) {
-        reject(closedError());
-        return;
-      }
-      const waiter = { resolve, reject };
-      if (!inFlight) {
-        runQueued(cmd, [waiter], services);
-        return;
-      }
-      if (!coalesce) {
-        pending = [...pending, { cmd, waiters: [waiter], services }];
-        return;
-      }
-      const waiters = pending.flatMap((send) => send.waiters);
-      // The newest command replaces the pending work, so its service context owns the
-      // actual send; callers whose commands were superseded still settle with it.
-      pending = [{ cmd, waiters: [...waiters, waiter], services }];
-    });
+  const send = Effect.fn("mesh.command")(function* (cmd: Domain.LightCommand) {
+    const metadata = {
+      "mesh.commandId": randomUUID(),
+      "mesh.address": options.address,
+      "mesh.mode": cmd._tag,
+    };
+    yield* Effect.annotateCurrentSpan(metadata);
+    return yield* Effect.gen(function* () {
+      if (closed) return yield* Effect.fail(closedError());
+      yield* Effect.logDebug("[mesh] command queued").pipe(
+        Effect.annotateLogs("mesh.phase", "queue"),
+        Effect.withSpan("mesh.queue"),
+      );
+      // The mailbox captures these annotations along with the executing
+      // caller's logger and tracing context for queued work and idle cleanup.
+      return yield* mailbox.send(cmd);
+    }).pipe(Effect.annotateLogs(metadata));
+  });
 
   return {
-    send: (cmd) =>
-      Effect.flatMap(Effect.context<never>(), (services) =>
-        Effect.tryPromise({
-          try: () => enqueue(cmd, services),
-          catch: (cause) => cause as TransportError | TransportUnsupportedError,
-        }),
-      ),
+    send,
     close: () =>
       Effect.uninterruptible(
         Effect.gen(function* () {
@@ -497,21 +479,15 @@ export const makeMeshController = (options: MeshControllerOptions): MeshControll
             if (!closeResult) {
               closed = true;
               clearIdleTimer();
-              settle(
-                pending.flatMap((send) => send.waiters),
-                closedError(),
-              );
-              pending = [];
-              // Publish the latch before starting cleanup, including synchronous
-              // callbacks in a disconnect implementation.
+              // Publish once before starting cleanup, including synchronous
+              // disconnect callbacks that re-enter close.
               closeResult = Promise.resolve().then(() =>
                 Effect.runPromiseWith(services)(
                   Effect.gen(function* () {
-                    // Send finalizers retain the source lease through disconnect.
+                    yield* mailbox.close;
                     yield* Scope.close(sendScope, Exit.void);
                     yield* closeWriter();
                     yield* Scope.close(cleanupScope, Exit.void);
-                    if (inFlight) yield* Effect.promise(() => inFlight!);
                   }),
                 ),
               );

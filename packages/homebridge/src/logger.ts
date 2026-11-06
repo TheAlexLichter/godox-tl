@@ -19,12 +19,34 @@ const stringify = (message: unknown): string => {
   return String(message);
 };
 
+// An explicit allowlist keeps unrelated annotations (including caller secrets)
+// out of Homebridge output without changing events seen by other loggers.
+const diagnosticFields = [
+  ["mesh.commandId", "command"],
+  ["mesh.address", "target"],
+  ["mesh.mode", "mode"],
+  ["mesh.attempt", "attempt"],
+  ["mesh.phase", "phase"],
+  ["mesh.durationMs", "durationMs"],
+  ["mesh.outcome", "outcome"],
+] as const;
+
+const diagnosticSuffix = (annotations: Readonly<Record<string, unknown>>): string => {
+  const fields = diagnosticFields.flatMap(([key, label]) => {
+    const value = annotations[key];
+    if (typeof value !== "string" && typeof value !== "number") return [];
+    return [`${label}=${typeof value === "string" ? JSON.stringify(value) : value}`];
+  });
+  return fields.length ? ` [${fields.join(" ")}]` : "";
+};
+
 /** Build an Effect `Logger` that forwards every `Effect.logInfo` /
  * `logWarning` / `logError` / `logDebug` call to the supplied Homebridge
  * `Logger`. Trace is dropped (Homebridge has no equivalent level). */
 const makeHomebridgeEffectLogger = (hbLog: HomebridgeLogger) =>
-  EffectLogger.make(({ logLevel, message }) => {
-    const text = stringify(message);
+  EffectLogger.make(({ logLevel, message, fiber }) => {
+    const text =
+      stringify(message) + diagnosticSuffix(fiber.getRef(References.CurrentLogAnnotations));
     switch (logLevel) {
       case "Error":
       case "Fatal":
